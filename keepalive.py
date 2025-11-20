@@ -25,10 +25,15 @@ def health():
         "bot": "running"
     }, 200
 
-def run_keepalive(port=8080):
+def run_keepalive(port=None):
     """KeepAlive 서버 실행"""
+    import os
+    # Replit에서는 환경 변수 PORT를 사용, 없으면 8080 사용
+    if port is None:
+        port = int(os.environ.get('PORT', 8080))
     print(f"KeepAlive 서버 시작: http://0.0.0.0:{port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Replit에서는 use_reloader=False로 설정
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
     run_keepalive()
