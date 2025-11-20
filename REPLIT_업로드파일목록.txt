@@ -1,0 +1,14 @@
+Replit에 업로드해야 할 필수 파일 4개:
+
+1. bot.py
+2. config.py  
+3. keepalive.py
+4. requirements.txt
+
+업로드 방법:
+- 각 파일을 열어서 내용을 복사
+- Replit에서 새 파일 만들고 붙여넣기
+
+또는
+- 파일을 드래그 앤 드롭으로 업로드
+
