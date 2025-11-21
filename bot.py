@@ -215,7 +215,8 @@ class TelegramChannelForwarder:
                         if group_id not in registered_group_ids:
                             registered_group_ids.append(group_id)
                             await self.save_groups_to_file()
-                            logger.info(f"새 그룹 등록: {group_id} (총 {len(registered_group_ids)}개, 사용자: {user_id})")
+                            logger.info(f"✅ 새 그룹 등록 완료: {group_id} (총 {len(registered_group_ids)}개, 사용자: {user_id})")
+                            logger.info(f"📝 저장된 그룹 목록: {registered_group_ids}")
                             
                             # 그룹에 성공 메시지
                             try:
@@ -297,14 +298,14 @@ class TelegramChannelForwarder:
             except Exception as e:
                 logger.warning(f"Webhook 확인 중 오류 (무시): {e}")
             
-            # Polling 시작 전 잠시 대기 (다른 인스턴스 종료 대기)
-            await asyncio.sleep(2)
+            # Polling 시작 전 충분한 대기 시간 (배포 중 이전 인스턴스 종료 대기)
+            await asyncio.sleep(5)
             
             await self.application.updater.start_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True
             )
-            logger.info("봇이 완전히 시작되었습니다!")
+            logger.info("✅ 봇이 완전히 시작되었습니다!")
             self.is_fully_started = True  # 봇 시작 완료 플래그 설정
             
             # 기존 채널 메시지를 순차적으로 전송하는 작업 시작
@@ -452,9 +453,10 @@ class TelegramChannelForwarder:
                     # 메시지 ID를 채널 메시지 목록에 추가 (없으면)
                     if message_id not in channel_message_ids:
                         channel_message_ids.append(message_id)
-                        logger.info(f"새 메시지 ID 추가: {message_id} (총 {len(channel_message_ids)}개)")
-                        # 파일에 저장
+                        logger.info(f"📨 새 메시지 ID 추가: {message_id} (총 {len(channel_message_ids)}개)")
+                        # 파일에 자동 저장 (Render에서도 영구 저장)
                         await self.save_message_ids_to_file()
+                        logger.info(f"💾 메시지 ID 목록이 파일에 저장되었습니다.")
                     
                     logger.info(f"메시지 즉시 전송 완료 (ID: {message_id})")
                     return  # 성공하면 종료
@@ -553,6 +555,7 @@ class TelegramChannelForwarder:
                     if group_id in registered_group_ids:
                         registered_group_ids.remove(group_id)
                         await self.save_groups_to_file()
+                        logger.info(f"💾 그룹 제거 후 목록이 파일에 저장되었습니다: {registered_group_ids}")
                     failed_groups.append(group_id)
                 elif "forbidden" in error_msg:
                     logger.warning(f"그룹 {group_id}에서 권한이 없습니다. (메시지 전송 권한 필요)")
@@ -606,19 +609,38 @@ class TelegramChannelForwarder:
             logger.error(f"메시지 ID 파일 읽기 실패: {e}", exc_info=True)
     
     async def save_message_ids_to_file(self):
-        """메시지 ID 목록을 파일에 저장 (봇 재시작 시에도 유지됨)"""
-        try:
-            from pathlib import Path
-            ids_file = Path(__file__).parent / 'message_ids.txt'
-            with open(ids_file, 'w', encoding='utf-8') as f:
-                f.write("# 채널에 있는 메시지 ID 목록\n")
-                f.write("# 한 줄에 하나씩 메시지 ID만 입력\n")
-                f.write("# 봇이 자동으로 관리하므로 수동 수정 불필요\n\n")
-                for msg_id in sorted(channel_message_ids):
-                    f.write(f"{msg_id}\n")
-            logger.debug(f"메시지 ID {len(channel_message_ids)}개를 파일에 저장했습니다.")
-        except Exception as e:
-            logger.error(f"메시지 ID 파일 저장 실패: {e}")
+        """메시지 ID 목록을 파일에 저장 (봇 재시작 시에도 유지됨, Render에서도 자동 저장)"""
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                from pathlib import Path
+                ids_file = Path(__file__).parent / 'message_ids.txt'
+                file_path = str(ids_file.absolute())
+                
+                with open(ids_file, 'w', encoding='utf-8') as f:
+                    f.write("# 채널에 있는 메시지 ID 목록\n")
+                    f.write("# 한 줄에 하나씩 메시지 ID만 입력\n")
+                    f.write("# 봇이 자동으로 관리하므로 수동 수정 불필요\n\n")
+                    for msg_id in sorted(channel_message_ids):
+                        f.write(f"{msg_id}\n")
+                
+                # 파일이 제대로 저장되었는지 확인
+                if ids_file.exists():
+                    file_size = ids_file.stat().st_size
+                    logger.info(f"💾 메시지 ID {len(channel_message_ids)}개를 파일에 저장했습니다 (경로: {file_path}, 크기: {file_size} bytes)")
+                    logger.info(f"📋 저장된 메시지 ID: {sorted(channel_message_ids)}")
+                    return  # 성공하면 종료
+                else:
+                    raise Exception("파일이 생성되지 않았습니다.")
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"⚠️ 메시지 ID 파일 저장 시도 {attempt + 1}/{max_retries} 실패, 재시도 중...: {e}")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ 메시지 ID 파일 저장 최종 실패 ({max_retries}회 시도): {e}", exc_info=True)
     
     async def load_groups_from_file(self):
         """파일에서 등록된 그룹 ID 목록 불러오기"""
@@ -628,36 +650,61 @@ class TelegramChannelForwarder:
             groups_file = Path(__file__).parent / 'registered_groups.txt'
             if groups_file.exists():
                 loaded_count = 0
+                loaded_groups = []
                 with open(groups_file, 'r', encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
                         if line and not line.startswith('#'):
                             if line not in registered_group_ids:
                                 registered_group_ids.append(line)
+                                loaded_groups.append(line)
                                 loaded_count += 1
                 if loaded_count > 0:
-                    logger.info(f"파일에서 그룹 ID {loaded_count}개를 불러왔습니다. (총 {len(registered_group_ids)}개)")
+                    logger.info(f"✅ 파일에서 그룹 ID {loaded_count}개를 불러왔습니다: {loaded_groups}")
+                    logger.info(f"📋 현재 등록된 그룹 총 {len(registered_group_ids)}개: {registered_group_ids}")
+                else:
+                    logger.info(f"📋 파일에서 불러온 그룹이 없습니다. 현재 등록된 그룹: {len(registered_group_ids)}개")
             else:
                 # 파일이 없으면 config의 기본 그룹만 사용
-                logger.info(f"registered_groups.txt 파일이 없습니다. config.py의 기본 그룹을 사용합니다.")
+                logger.info(f"⚠️ registered_groups.txt 파일이 없습니다. config.py의 기본 그룹을 사용합니다.")
+                logger.info(f"📋 현재 등록된 그룹: {len(registered_group_ids)}개 - {registered_group_ids}")
         except Exception as e:
-            logger.error(f"그룹 ID 파일 읽기 실패: {e}")
+            logger.error(f"❌ 그룹 ID 파일 읽기 실패: {e}", exc_info=True)
     
     async def save_groups_to_file(self):
-        """등록된 그룹 ID 목록을 파일에 저장"""
+        """등록된 그룹 ID 목록을 파일에 저장 (Render에서도 자동 저장, 재배포 없이 유지됨)"""
         global registered_group_ids
-        try:
-            from pathlib import Path
-            groups_file = Path(__file__).parent / 'registered_groups.txt'
-            with open(groups_file, 'w', encoding='utf-8') as f:
-                f.write("# 등록된 그룹 ID 목록\n")
-                f.write("# 한 줄에 하나씩 그룹 ID만 입력\n")
-                f.write("# 그룹에서 /월하 명령어로 자동 추가됨\n\n")
-                for group_id in registered_group_ids:
-                    f.write(f"{group_id}\n")
-            logger.debug(f"그룹 ID {len(registered_group_ids)}개를 파일에 저장했습니다.")
-        except Exception as e:
-            logger.error(f"그룹 ID 파일 저장 실패: {e}")
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                from pathlib import Path
+                groups_file = Path(__file__).parent / 'registered_groups.txt'
+                file_path = str(groups_file.absolute())
+                
+                with open(groups_file, 'w', encoding='utf-8') as f:
+                    f.write("# 등록된 그룹 ID 목록\n")
+                    f.write("# 한 줄에 하나씩 그룹 ID만 입력\n")
+                    f.write("# 그룹에서 /월하 명령어로 자동 추가됨\n\n")
+                    for group_id in registered_group_ids:
+                        f.write(f"{group_id}\n")
+                
+                # 파일이 제대로 저장되었는지 확인
+                if groups_file.exists():
+                    file_size = groups_file.stat().st_size
+                    logger.info(f"💾 그룹 ID {len(registered_group_ids)}개를 파일에 저장했습니다 (경로: {file_path}, 크기: {file_size} bytes)")
+                    logger.info(f"📋 저장된 그룹 목록: {registered_group_ids}")
+                    return  # 성공하면 종료
+                else:
+                    raise Exception("파일이 생성되지 않았습니다.")
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"⚠️ 그룹 ID 파일 저장 시도 {attempt + 1}/{max_retries} 실패, 재시도 중...: {e}")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ 그룹 ID 파일 저장 최종 실패 ({max_retries}회 시도): {e}", exc_info=True)
     
     async def send_first_message_to_new_group(self, group_id: str, message_id: int):
         """새로 등록된 그룹에 첫 메시지만 즉시 전송 (중복 방지)"""
