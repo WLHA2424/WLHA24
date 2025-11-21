@@ -792,6 +792,24 @@ class TelegramChannelForwarder:
                     
                     # 모든 확인이 완료되었으므로 메시지 전송 성공으로 간주
                     logger.info(f"✅ 메시지 전달 성공 확인! (원본 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}, 그룹: {group_id})")
+                    
+                    # 메시지 고정 (텔레그램 그룹은 여러 메시지를 동시에 고정 가능 #0, #1, #2...)
+                    try:
+                        await self.application.bot.pin_chat_message(
+                            chat_id=group_id,
+                            message_id=forwarded_message_id,
+                            disable_notification=True
+                        )
+                        logger.info(f"📌 메시지 고정 완료 (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                    except Exception as pin_error:
+                        error_msg = str(pin_error).lower()
+                        if "not enough rights" in error_msg or "no rights" in error_msg:
+                            logger.warning(f"⚠️ 메시지 고정 실패: 봇에 고정 권한이 없습니다 (그룹: {group_id})")
+                        elif "message to pin not found" in error_msg or "message not found" in error_msg:
+                            logger.warning(f"⚠️ 메시지 고정 실패: 메시지를 찾을 수 없습니다 (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                        else:
+                            logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}, 메시지 ID: {forwarded_message_id}): {pin_error}")
+                    
                     success_count += 1
                     success = True
                     # API 제한을 피하기 위해 약간의 지연
@@ -1138,14 +1156,22 @@ class TelegramChannelForwarder:
                         message_id=message_data['message_id']
                     )
                     
-                    # 메시지 고정
+                    # 메시지 고정 (텔레그램이 자동으로 이전 고정 메시지를 해제함)
                     try:
                         await self.application.bot.pin_chat_message(
                             chat_id=group_id,
-                            message_id=result.message_id
+                            message_id=result.message_id,
+                            disable_notification=True
                         )
-                    except:
-                        pass
+                        logger.info(f"📌 메시지 고정 완료 (그룹: {group_id}, 메시지 ID: {result.message_id})")
+                    except Exception as pin_error:
+                        error_msg = str(pin_error).lower()
+                        if "not enough rights" in error_msg or "no rights" in error_msg:
+                            logger.warning(f"⚠️ 메시지 고정 실패: 봇에 고정 권한이 없습니다 (그룹: {group_id})")
+                        elif "message to pin not found" in error_msg or "message not found" in error_msg:
+                            logger.warning(f"⚠️ 메시지 고정 실패: 메시지를 찾을 수 없습니다 (그룹: {group_id}, 메시지 ID: {result.message_id})")
+                        else:
+                            logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}): {pin_error}")
                     
                     # 전송 완료 플래그 설정
                     new_group_first_message_sent[group_id] = True
@@ -1231,10 +1257,18 @@ class TelegramChannelForwarder:
                         try:
                             await self.application.bot.pin_chat_message(
                                 chat_id=group_id,
-                                message_id=result.message_id
+                                message_id=result.message_id,
+                                disable_notification=True
                             )
-                        except:
-                            pass
+                            logger.info(f"📌 메시지 고정 완료 (그룹: {group_id}, 메시지 ID: {result.message_id})")
+                        except Exception as pin_error:
+                            error_msg = str(pin_error).lower()
+                            if "not enough rights" in error_msg or "no rights" in error_msg:
+                                logger.warning(f"⚠️ 메시지 고정 실패: 봇에 고정 권한이 없습니다 (그룹: {group_id})")
+                            elif "message to pin not found" in error_msg or "message not found" in error_msg:
+                                logger.warning(f"⚠️ 메시지 고정 실패: 메시지를 찾을 수 없습니다 (그룹: {group_id}, 메시지 ID: {result.message_id})")
+                            else:
+                                logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}, 메시지 ID: {result.message_id}): {pin_error}")
                         
                         logger.info(f"[기존 메시지 {idx}/{len(channel_message_ids)}] 그룹 {group_id}에 전송 완료 (ID: {message_id})")
                         break  # 성공하면 재시도 루프 종료
