@@ -172,7 +172,7 @@ class TelegramChannelForwarder:
                     # 그룹에 안내 메시지
                     await self.application.bot.send_message(
                         chat_id=group_id,
-                        text="🔐 그룹 등록을 위해 비밀번호가 필요합니다.\n봇과의 개인 대화에서 비밀번호를 입력해주세요."
+                        text="🔐 그룹 등록을 위해 비밀번호가 필요합니다."
                     )
                     
                     # 사용자에게 DM으로 비밀번호 요청
@@ -213,20 +213,19 @@ class TelegramChannelForwarder:
                             await self.save_groups_to_file()
                             logger.info(f"새 그룹 등록: {group_id} (총 {len(registered_group_ids)}개, 사용자: {user_id})")
                             
-                            # 사용자에게 성공 메시지
-                            await self.application.bot.send_message(
-                                chat_id=user_id,
-                                text=f"✅ 비밀번호가 확인되었습니다!\n그룹이 등록되었습니다.\n그룹 ID: {group_id}\n이제 비공개 채널의 메시지가 이 그룹에도 자동으로 전송됩니다."
-                            )
-                            
-                            # 그룹에도 성공 메시지
+                            # 그룹에 성공 메시지
                             try:
                                 await self.application.bot.send_message(
                                     chat_id=group_id,
-                                    text=f"✅ 그룹이 등록되었습니다!\n그룹 ID: {group_id}\n이제 비공개 채널의 메시지가 이 그룹에도 자동으로 전송됩니다."
+                                    text="✅ 그룹이 등록되었습니다!"
                                 )
                             except:
                                 pass
+                            
+                            # 기존 메시지가 있으면 즉시 전송
+                            if channel_message_ids:
+                                logger.info(f"새 그룹 등록: {group_id}, 기존 메시지 {len(channel_message_ids)}개 즉시 전송 시작")
+                                asyncio.create_task(self.send_existing_messages_to_new_group(group_id))
                         else:
                             await self.application.bot.send_message(
                                 chat_id=user_id,
@@ -639,6 +638,55 @@ class TelegramChannelForwarder:
             logger.debug(f"그룹 ID {len(registered_group_ids)}개를 파일에 저장했습니다.")
         except Exception as e:
             logger.error(f"그룹 ID 파일 저장 실패: {e}")
+    
+    async def send_existing_messages_to_new_group(self, group_id: str):
+        """새로 등록된 그룹에 기존 메시지들을 즉시 전송"""
+        try:
+            if not channel_message_ids:
+                return
+            
+            logger.info(f"그룹 {group_id}에 기존 메시지 {len(channel_message_ids)}개 즉시 전송 중...")
+            
+            for idx, message_id in enumerate(channel_message_ids, 1):
+                message_data = {
+                    'chat_id': int(SOURCE_CHANNEL_ID),
+                    'message_id': message_id,
+                    'date': None
+                }
+                
+                try:
+                    # 특정 그룹에만 전송
+                    result = await self.application.bot.forward_message(
+                        chat_id=group_id,
+                        from_chat_id=message_data['chat_id'],
+                        message_id=message_data['message_id']
+                    )
+                    
+                    # 메시지 고정
+                    try:
+                        await self.application.bot.pin_chat_message(
+                            chat_id=group_id,
+                            message_id=result.message_id
+                        )
+                    except:
+                        pass
+                    
+                    logger.info(f"[기존 메시지 {idx}/{len(channel_message_ids)}] 그룹 {group_id}에 전송 완료 (ID: {message_id})")
+                    
+                    # API 제한을 피하기 위해 약간의 지연
+                    if idx < len(channel_message_ids):
+                        await asyncio.sleep(1)  # 1초 간격
+                        
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "message to forward not found" in error_msg or "message not found" in error_msg:
+                        logger.warning(f"메시지 {message_id}가 채널에 존재하지 않습니다. 건너뜁니다.")
+                    else:
+                        logger.error(f"기존 메시지 전송 실패 (그룹: {group_id}, ID: {message_id}): {e}")
+            
+            logger.info(f"그룹 {group_id}에 기존 메시지 전송 완료")
+        except Exception as e:
+            logger.error(f"기존 메시지 전송 중 오류: {e}", exc_info=True)
     
     async def send_existing_messages_sequentially(self):
         """기존 채널 메시지를 순차적으로 무한 반복 전송 (10분 간격)"""
