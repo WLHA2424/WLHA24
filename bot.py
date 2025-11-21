@@ -65,6 +65,7 @@ class TelegramChannelForwarder:
     def __init__(self):
         self.application = None
         self.is_running = False
+        self.is_fully_started = False  # 봇이 완전히 시작되었는지 확인
         
     async def start(self):
         """봇 시작"""
@@ -293,6 +294,7 @@ class TelegramChannelForwarder:
                 drop_pending_updates=True
             )
             logger.info("봇이 완전히 시작되었습니다!")
+            self.is_fully_started = True  # 봇 시작 완료 플래그 설정
             
             # 기존 채널 메시지를 순차적으로 전송하는 작업 시작
             asyncio.create_task(self.send_existing_messages_sequentially())
@@ -640,8 +642,27 @@ class TelegramChannelForwarder:
             logger.error(f"그룹 ID 파일 저장 실패: {e}")
     
     async def send_existing_messages_to_new_group(self, group_id: str):
-        """새로 등록된 그룹에 기존 메시지들을 즉시 전송"""
+        """새로 등록된 그룹에 기존 메시지들을 즉시 전송 (봇이 완전히 시작된 후)"""
         try:
+            # 봇이 완전히 시작될 때까지 대기 (최대 30초)
+            max_wait_time = 30
+            wait_interval = 1
+            waited = 0
+            
+            while not self.is_fully_started and waited < max_wait_time:
+                await asyncio.sleep(wait_interval)
+                waited += wait_interval
+                logger.debug(f"봇 시작 대기 중... ({waited}초)")
+            
+            if not self.is_fully_started:
+                logger.warning(f"봇이 {max_wait_time}초 내에 시작되지 않았습니다. 기존 메시지 전송을 건너뜁니다.")
+                return
+            
+            # application이 초기화되었는지 확인
+            if not self.application or not self.application.bot:
+                logger.warning("봇 application이 초기화되지 않았습니다. 기존 메시지 전송을 건너뜁니다.")
+                return
+            
             if not channel_message_ids:
                 return
             
@@ -654,35 +675,49 @@ class TelegramChannelForwarder:
                     'date': None
                 }
                 
-                try:
-                    # 특정 그룹에만 전송
-                    result = await self.application.bot.forward_message(
-                        chat_id=group_id,
-                        from_chat_id=message_data['chat_id'],
-                        message_id=message_data['message_id']
-                    )
-                    
-                    # 메시지 고정
+                # 재시도 로직 (최대 3회)
+                max_retries = 3
+                retry_delay = 2  # 재시도 간격 (초)
+                
+                for attempt in range(max_retries):
                     try:
-                        await self.application.bot.pin_chat_message(
+                        # 특정 그룹에만 전송
+                        result = await self.application.bot.forward_message(
                             chat_id=group_id,
-                            message_id=result.message_id
+                            from_chat_id=message_data['chat_id'],
+                            message_id=message_data['message_id']
                         )
-                    except:
-                        pass
-                    
-                    logger.info(f"[기존 메시지 {idx}/{len(channel_message_ids)}] 그룹 {group_id}에 전송 완료 (ID: {message_id})")
-                    
-                    # API 제한을 피하기 위해 약간의 지연
-                    if idx < len(channel_message_ids):
-                        await asyncio.sleep(1)  # 1초 간격
                         
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    if "message to forward not found" in error_msg or "message not found" in error_msg:
-                        logger.warning(f"메시지 {message_id}가 채널에 존재하지 않습니다. 건너뜁니다.")
-                    else:
-                        logger.error(f"기존 메시지 전송 실패 (그룹: {group_id}, ID: {message_id}): {e}")
+                        # 메시지 고정
+                        try:
+                            await self.application.bot.pin_chat_message(
+                                chat_id=group_id,
+                                message_id=result.message_id
+                            )
+                        except:
+                            pass
+                        
+                        logger.info(f"[기존 메시지 {idx}/{len(channel_message_ids)}] 그룹 {group_id}에 전송 완료 (ID: {message_id})")
+                        break  # 성공하면 재시도 루프 종료
+                        
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        
+                        # 메시지가 존재하지 않는 경우 재시도 불필요
+                        if "message to forward not found" in error_msg or "message not found" in error_msg:
+                            logger.warning(f"메시지 {message_id}가 채널에 존재하지 않습니다. 건너뜁니다.")
+                            break
+                        
+                        # 네트워크 오류나 일시적 오류인 경우 재시도
+                        if attempt < max_retries - 1:
+                            logger.warning(f"기존 메시지 전송 실패 (그룹: {group_id}, ID: {message_id}, 시도 {attempt + 1}/{max_retries}): {e}")
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            logger.error(f"기존 메시지 전송 최종 실패 (그룹: {group_id}, ID: {message_id}): {e}")
+                
+                # API 제한을 피하기 위해 약간의 지연
+                if idx < len(channel_message_ids):
+                    await asyncio.sleep(1)  # 1초 간격
             
             logger.info(f"그룹 {group_id}에 기존 메시지 전송 완료")
         except Exception as e:
