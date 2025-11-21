@@ -695,27 +695,30 @@ class TelegramChannelForwarder:
                             break
                     
                     forwarded_message_id = result.message_id
-                    logger.info(f"✅ 메시지 전달 성공! (원본 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}, 그룹: {group_id})")
+                    logger.info(f"📤 forward_message API 응답 수신: 전달된 메시지 ID={forwarded_message_id}, 그룹={group_id}")
                     
                     # 실제로 메시지가 전송되었는지 확인 (전송된 메시지를 조회)
                     message_verified = False
                     try:
                         await asyncio.sleep(1)  # 전송 후 잠시 대기
-                        # 전송된 메시지를 조회하여 실제로 존재하는지 확인
+                        # 봇이 그룹에 있는지 확인
                         try:
-                            verify_message = await self.application.bot.get_chat_member(
+                            bot_member = await self.application.bot.get_chat_member(
                                 chat_id=group_id,
                                 user_id=self.application.bot.id
                             )
-                            if verify_message.status in ['left', 'kicked']:
+                            if bot_member.status in ['left', 'kicked']:
                                 logger.error(f"❌ 봇이 그룹 {group_id}에서 제거되었습니다. 목록에서 제거합니다.")
                                 if group_id in registered_group_ids:
                                     registered_group_ids.remove(group_id)
                                     await self.save_groups_to_file()
                                 failed_groups.append(group_id)
                                 break
+                            
+                            # 그룹 정보 확인
+                            verify_chat = await self.application.bot.get_chat(chat_id=group_id)
                             message_verified = True
-                            logger.info(f"✅ 메시지 전송 검증 완료: 그룹 {group_id}에 봇이 정상적으로 있습니다.")
+                            logger.info(f"✅ 그룹 확인 완료: {verify_chat.title} (그룹 ID: {group_id})")
                         except Exception as member_error:
                             error_msg = str(member_error).lower()
                             if "chat not found" in error_msg or "bot was kicked" in error_msg or "bot was blocked" in error_msg:
@@ -726,7 +729,7 @@ class TelegramChannelForwarder:
                                 failed_groups.append(group_id)
                                 break
                             else:
-                                # 다른 에러는 경고만 하고 계속 진행
+                                # 다른 에러는 경고만 하고 계속 진행 (네트워크 문제 등)
                                 logger.warning(f"⚠️ 메시지 전송 검증 중 오류 (무시하고 계속): {member_error}")
                                 message_verified = True  # 에러가 있어도 계속 진행
                     except Exception as verify_error:
@@ -742,18 +745,46 @@ class TelegramChannelForwarder:
                             failed_groups.append(group_id)
                             break
                     
-                    # 전달한 메시지를 고정 (pin)
+                    # 전달한 메시지를 고정 (pin) - 메시지가 실제로 존재하는지 확인하는 방법
+                    message_pinned = False
                     try:
                         await self.application.bot.pin_chat_message(
                             chat_id=group_id,
                             message_id=forwarded_message_id
                         )
+                        message_pinned = True
                         logger.info(f"📌 메시지 고정 완료! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
                     except Exception as pin_error:
-                        logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}): {pin_error} (봇이 그룹에서 메시지를 고정할 권한이 없을 수 있습니다)")
+                        error_msg = str(pin_error).lower()
+                        # 메시지가 존재하지 않는 경우
+                        if "message to pin not found" in error_msg or "message not found" in error_msg:
+                            logger.error(f"❌ 메시지가 그룹에 존재하지 않습니다. 전송 실패로 처리합니다. (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                            if retry_count < max_retries - 1:
+                                retry_count += 1
+                                continue
+                            else:
+                                failed_groups.append(group_id)
+                                break
+                        else:
+                            # 권한 문제 등 다른 에러는 경고만
+                            logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}): {pin_error} (봇이 그룹에서 메시지를 고정할 권한이 없을 수 있습니다)")
+                            # 고정 실패해도 메시지는 전송되었을 수 있으므로 계속 진행
+                            message_pinned = True
                     
-                    success_count += 1
-                    success = True
+                    # 메시지 고정 성공 또는 권한 문제인 경우에만 성공으로 처리
+                    if message_pinned:
+                        # 검증 완료 후에만 성공 로그 출력
+                        logger.info(f"✅ 메시지 전달 성공! (원본 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}, 그룹: {group_id})")
+                        success_count += 1
+                        success = True
+                    else:
+                        logger.error(f"❌ 메시지 전송 실패: 메시지가 그룹에 존재하지 않습니다. (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                        if retry_count < max_retries - 1:
+                            retry_count += 1
+                            continue
+                        else:
+                            failed_groups.append(group_id)
+                            break
                     # API 제한을 피하기 위해 약간의 지연
                     await asyncio.sleep(0.3)
                     break  # 성공 시 루프 종료
