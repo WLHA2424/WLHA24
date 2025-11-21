@@ -346,8 +346,7 @@ class TelegramChannelForwarder:
             try:
                 await self.application.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
-                    close_loop=False  # 루프를 닫지 않음
+                    drop_pending_updates=True
                 )
                 logger.info("✅ 봇이 완전히 시작되었습니다!")
                 self.is_fully_started = True  # 봇 시작 완료 플래그 설정
@@ -363,8 +362,7 @@ class TelegramChannelForwarder:
                         await asyncio.sleep(3)
                         await self.application.updater.start_polling(
                             allowed_updates=Update.ALL_TYPES,
-                            drop_pending_updates=True,
-                            close_loop=False
+                            drop_pending_updates=True
                         )
                         logger.info("✅ 봇이 재시도 후 시작되었습니다!")
                         self.is_fully_started = True
