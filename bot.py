@@ -194,10 +194,12 @@ class TelegramChannelForwarder:
                 if user_id in pending_registrations:
                     del pending_registrations[user_id]
         
-        # /월하 명령어만 처리하도록 필터 설정
-        from telegram.ext import CommandHandler
-        # CommandHandler는 /월하 명령어만 처리 (일반 메시지는 무시)
-        self.application.add_handler(CommandHandler("월하", group_message_handler, filters=filters.ChatType.GROUPS))
+        # /월하 명령어만 처리하도록 필터 설정 (한글 명령어는 MessageHandler 사용)
+        # CommandHandler는 한글을 지원하지 않으므로 MessageHandler + Regex 사용
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & filters.ChatType.GROUPS & filters.Regex(r'^/월하(@\w+)?\s*$'),
+            group_message_handler
+        ))
         
         # 개인 메시지 핸들러 (비밀번호 입력용)
         async def private_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
