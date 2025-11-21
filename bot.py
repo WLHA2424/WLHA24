@@ -149,57 +149,55 @@ class TelegramChannelForwarder:
         
         self.application.add_handler(TypeHandler(Update, all_updates_handler), group=-1)
         
-        # 그룹 메시지 핸들러 (그룹 등록용)
+        # 그룹 메시지 핸들러 (그룹 등록용) - /월하 명령어만 처리
         async def group_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            """그룹에서 메시지를 받았을 때 처리 (그룹 등록용)"""
-            if update.message and update.message.chat.type in ['group', 'supergroup']:
-                text = update.message.text
-                # 텔레그램 봇 명령어는 /월하 또는 /월하@botusername 형식으로 올 수 있음
-                if text:
-                    # @botusername 부분 제거하고 명령어만 추출
-                    command = text.split()[0].split('@')[0].strip() if text.split() else ""
-                    logger.info(f"그룹 메시지 수신: chat_id={update.message.chat.id}, user_id={update.message.from_user.id}, text={text}, command={command}")
-                    
-                    if command == '/월하':
-                        group_id = str(update.message.chat.id)
-                        user_id = update.message.from_user.id
-                        logger.info(f"/월하 명령어 감지: 그룹={group_id}, 사용자={user_id}")
-                    
-                    # 이미 등록된 그룹인지 확인
-                    if group_id in registered_group_ids:
-                        await self.application.bot.send_message(
-                            chat_id=group_id,
-                            text=f"ℹ️ 이 그룹은 이미 등록되어 있습니다.\n그룹 ID: {group_id}"
-                        )
-                        return
-                    
-                    # 비밀번호 입력 대기 상태로 설정
-                    pending_registrations[user_id] = group_id
-                    
-                    # 그룹에 안내 메시지
-                    await self.application.bot.send_message(
-                        chat_id=group_id,
-                        text="🔐 그룹 등록을 위해 비밀번호가 필요합니다."
-                    )
-                    
-                    # 사용자에게 DM으로 비밀번호 요청
-                    try:
-                        await self.application.bot.send_message(
-                            chat_id=user_id,
-                            text=f"🔐 그룹 등록을 위한 비밀번호를 입력해주세요.\n그룹 ID: {group_id}\n\n비밀번호를 입력하세요:"
-                        )
-                        logger.info(f"비밀번호 입력 대기: 사용자 {user_id}, 그룹 {group_id}")
-                    except Exception as e:
-                        logger.error(f"DM 전송 실패 (사용자 {user_id}): {e}")
-                        # DM을 보낼 수 없으면 그룹에 안내
-                        await self.application.bot.send_message(
-                            chat_id=group_id,
-                            text="❌ 봇과의 개인 대화를 먼저 시작해주세요.\n(봇에게 아무 메시지나 보내면 됩니다)"
-                        )
-                        if user_id in pending_registrations:
-                            del pending_registrations[user_id]
+            """그룹에서 /월하 명령어를 받았을 때 처리 (그룹 등록용)"""
+            if not update.message or update.message.chat.type not in ['group', 'supergroup']:
+                return
+            
+            # /월하 명령어 처리 (필터에서 이미 확인했으므로 바로 처리)
+            group_id = str(update.message.chat.id)
+            user_id = update.message.from_user.id
+            logger.info(f"/월하 명령어 감지: 그룹={group_id}, 사용자={user_id}")
+            
+            # 이미 등록된 그룹인지 확인
+            if group_id in registered_group_ids:
+                await self.application.bot.send_message(
+                    chat_id=group_id,
+                    text=f"ℹ️ 이 그룹은 이미 등록되어 있습니다.\n그룹 ID: {group_id}"
+                )
+                return
+            
+            # 비밀번호 입력 대기 상태로 설정
+            pending_registrations[user_id] = group_id
+            
+            # 그룹에 안내 메시지
+            await self.application.bot.send_message(
+                chat_id=group_id,
+                text="🔐 그룹 등록을 위해 비밀번호가 필요합니다."
+            )
+            
+            # 사용자에게 DM으로 비밀번호 요청
+            try:
+                await self.application.bot.send_message(
+                    chat_id=user_id,
+                    text=f"🔐 그룹 등록을 위한 비밀번호를 입력해주세요.\n그룹 ID: {group_id}\n\n비밀번호를 입력하세요:"
+                )
+                logger.info(f"비밀번호 입력 대기: 사용자 {user_id}, 그룹 {group_id}")
+            except Exception as e:
+                logger.error(f"DM 전송 실패 (사용자 {user_id}): {e}")
+                # DM을 보낼 수 없으면 그룹에 안내
+                await self.application.bot.send_message(
+                    chat_id=group_id,
+                    text="❌ 봇과의 개인 대화를 먼저 시작해주세요.\n(봇에게 아무 메시지나 보내면 됩니다)"
+                )
+                if user_id in pending_registrations:
+                    del pending_registrations[user_id]
         
-        self.application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, group_message_handler))
+        # /월하 명령어만 처리하도록 필터 설정
+        from telegram.ext import CommandHandler
+        # CommandHandler는 /월하 명령어만 처리 (일반 메시지는 무시)
+        self.application.add_handler(CommandHandler("월하", group_message_handler, filters=filters.ChatType.GROUPS))
         
         # 개인 메시지 핸들러 (비밀번호 입력용)
         async def private_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
