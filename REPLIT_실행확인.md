@@ -38,3 +38,5 @@ python bot.py
 2. UptimeRobot 설정
 3. 테스트 (비공개 채널에 메시지 올리기)
 
+
+

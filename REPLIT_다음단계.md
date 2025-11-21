@@ -87,3 +87,5 @@ python bot.py
 
 이제 PC를 꺼도 Replit에서 24시간 실행됩니다!
 
+
+

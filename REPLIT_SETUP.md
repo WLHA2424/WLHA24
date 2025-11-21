@@ -55,3 +55,5 @@ python bot.py
 - UptimeRobot 무료 플랜은 50개 모니터까지 가능합니다
 - KeepAlive 서버는 봇과 함께 실행되며, 봇이 종료되면 함께 종료됩니다
 
+
+
