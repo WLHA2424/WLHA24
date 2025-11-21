@@ -703,102 +703,100 @@ class TelegramChannelForwarder:
                     forwarded_message_id = result.message_id
                     logger.info(f"📤 forward_message API 응답 수신: 전달된 메시지 ID={forwarded_message_id}, 그룹={group_id}")
                     
-                    # 실제로 메시지가 전송되었는지 확인 (전송된 메시지를 조회)
-                    message_verified = False
+                    # 먼저 봇이 그룹에 있는지 확인 (메시지 전송 전 검증)
                     try:
-                        await asyncio.sleep(1)  # 전송 후 잠시 대기
-                        # 봇이 그룹에 있는지 확인
-                        try:
-                            bot_member = await self.application.bot.get_chat_member(
-                                chat_id=group_id,
-                                user_id=self.application.bot.id
-                            )
-                            if bot_member.status in ['left', 'kicked']:
-                                logger.error(f"❌ 봇이 그룹 {group_id}에서 제거되었습니다. 목록에서 제거합니다.")
-                                if group_id in registered_group_ids:
-                                    registered_group_ids.remove(group_id)
-                                    await self.save_groups_to_file()
-                                failed_groups.append(group_id)
-                                break
-                            
-                            # 그룹 정보 확인
-                            verify_chat = await self.application.bot.get_chat(chat_id=group_id)
-                            message_verified = True
-                            logger.info(f"✅ 그룹 확인 완료: {verify_chat.title} (그룹 ID: {group_id})")
-                        except Exception as member_error:
-                            error_msg = str(member_error).lower()
-                            if "chat not found" in error_msg or "bot was kicked" in error_msg or "bot was blocked" in error_msg:
-                                logger.error(f"❌ 그룹 {group_id}을 찾을 수 없거나 봇이 제거되었습니다. 목록에서 제거합니다.")
-                                if group_id in registered_group_ids:
-                                    registered_group_ids.remove(group_id)
-                                    await self.save_groups_to_file()
-                                failed_groups.append(group_id)
-                                break
-                            else:
-                                # 다른 에러는 경고만 하고 계속 진행 (네트워크 문제 등)
-                                logger.warning(f"⚠️ 메시지 전송 검증 중 오류 (무시하고 계속): {member_error}")
-                                message_verified = True  # 에러가 있어도 계속 진행
-                    except Exception as verify_error:
-                        logger.warning(f"⚠️ 메시지 전송 검증 중 예외 발생 (무시하고 계속): {verify_error}")
-                        message_verified = True  # 에러가 있어도 계속 진행
-                    
-                    if not message_verified:
-                        logger.error(f"❌ 메시지 전송 검증 실패: 그룹 {group_id}에 메시지가 전송되지 않았을 수 있습니다.")
-                        if retry_count < max_retries - 1:
-                            retry_count += 1
-                            continue
-                        else:
+                        bot_member = await self.application.bot.get_chat_member(
+                            chat_id=group_id,
+                            user_id=self.application.bot.id
+                        )
+                        if bot_member.status in ['left', 'kicked']:
+                            logger.error(f"❌ 봇이 그룹 {group_id}에서 제거되었습니다. 목록에서 제거합니다.")
+                            if group_id in registered_group_ids:
+                                registered_group_ids.remove(group_id)
+                                await self.save_groups_to_file()
                             failed_groups.append(group_id)
                             break
+                    except Exception as member_error:
+                        error_msg = str(member_error).lower()
+                        if "chat not found" in error_msg or "bot was kicked" in error_msg or "bot was blocked" in error_msg:
+                            logger.error(f"❌ 그룹 {group_id}을 찾을 수 없거나 봇이 제거되었습니다. 목록에서 제거합니다.")
+                            if group_id in registered_group_ids:
+                                registered_group_ids.remove(group_id)
+                                await self.save_groups_to_file()
+                            failed_groups.append(group_id)
+                            break
+                        else:
+                            logger.warning(f"⚠️ 그룹 멤버 확인 중 오류 (재시도): {member_error}")
+                            if retry_count < max_retries - 1:
+                                retry_count += 1
+                                continue
+                            else:
+                                logger.error(f"❌ 그룹 멤버 확인 실패: {member_error}")
+                                failed_groups.append(group_id)
+                                break
                     
-                    # 전달한 메시지를 고정 (pin) - 메시지가 실제로 존재하는지 확인하는 방법
+                    # 메시지 전송 후 실제로 전송되었는지 확인 (pin을 통한 검증)
                     message_actually_sent = False
-                    pin_error_occurred = False
-                    pin_error_msg = ""
+                    await asyncio.sleep(1.5)  # 전송 완료 대기 시간 증가
                     
                     try:
-                        # 메시지 전송 후 잠시 대기 (전송 완료 대기)
-                        await asyncio.sleep(1)
+                        # 메시지 고정 시도 (메시지가 실제로 존재하는지 확인하는 가장 확실한 방법)
+                        await self.application.bot.pin_chat_message(
+                            chat_id=group_id,
+                            message_id=forwarded_message_id,
+                            disable_notification=True
+                        )
+                        message_actually_sent = True
+                        logger.info(f"📌 메시지 고정 성공 → 메시지가 실제로 그룹에 존재함 확인! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
                         
-                        # 메시지 고정 시도 (메시지가 실제로 존재하는지 확인)
+                        # 고정 해제 (메시지만 확인하고 고정은 유지하지 않음)
                         try:
-                            await self.application.bot.pin_chat_message(
+                            await asyncio.sleep(0.5)
+                            await self.application.bot.unpin_chat_message(
                                 chat_id=group_id,
                                 message_id=forwarded_message_id
                             )
-                            message_actually_sent = True
-                            logger.info(f"📌 메시지 고정 성공 → 메시지가 실제로 그룹에 존재함 확인! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
-                        except Exception as pin_error:
-                            pin_error_occurred = True
-                            pin_error_msg = str(pin_error)
-                            error_msg_lower = pin_error_msg.lower()
+                            logger.debug(f"📌 메시지 고정 해제 완료 (그룹: {group_id})")
+                        except Exception as unpin_error:
+                            # 고정 해제 실패는 무시 (중요하지 않음)
+                            logger.debug(f"고정 해제 실패 (무시): {unpin_error}")
                             
-                            # 메시지가 존재하지 않는 경우
-                            if "message to pin not found" in error_msg_lower or "message not found" in error_msg_lower or "bad request: message to pin not found" in error_msg_lower:
-                                logger.error(f"❌ 메시지 고정 실패: 메시지가 그룹에 존재하지 않습니다! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
-                                logger.error(f"   → forward_message API는 성공했지만 실제로는 메시지가 전송되지 않았습니다.")
-                                message_actually_sent = False
-                            else:
-                                # 권한 문제 등 다른 에러는 메시지는 전송되었을 수 있음
-                                logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}): {pin_error}")
-                                logger.warning(f"   → 권한 문제일 수 있으므로 메시지는 전송되었을 것으로 간주합니다.")
-                                message_actually_sent = True  # 권한 문제는 메시지는 전송되었을 수 있음
-                    
-                    except Exception as verify_error:
-                        logger.error(f"❌ 메시지 고정 확인 중 예외 발생: {verify_error}")
-                        # 예외 발생 시 안전하게 실패 처리
-                        message_actually_sent = False
+                    except Exception as pin_error:
+                        pin_error_msg = str(pin_error)
+                        error_msg_lower = pin_error_msg.lower()
+                        
+                        # 메시지가 존재하지 않는 경우 - 명확한 실패
+                        if ("message to pin not found" in error_msg_lower or 
+                            "message not found" in error_msg_lower or 
+                            "bad request: message to pin not found" in error_msg_lower):
+                            logger.error(f"❌ 메시지 고정 실패: 메시지가 그룹에 존재하지 않습니다!")
+                            logger.error(f"   → forward_message API는 성공했지만 실제로는 메시지가 전송되지 않았습니다.")
+                            logger.error(f"   그룹: {group_id}, 원본 메시지 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}")
+                            message_actually_sent = False
+                        elif ("not enough rights" in error_msg_lower or 
+                              "no rights" in error_msg_lower or
+                              "chat admin required" in error_msg_lower):
+                            # 권한 문제인 경우, 메시지는 전송되었을 가능성이 높음
+                            # 하지만 확실하지 않으므로 재시도
+                            logger.warning(f"⚠️ 메시지 고정 실패: 권한 문제 (그룹: {group_id})")
+                            logger.warning(f"   → 메시지는 전송되었을 수 있지만, 검증을 위해 재시도합니다.")
+                            message_actually_sent = False  # 재시도를 위해 False 처리
+                        else:
+                            # 알 수 없는 에러는 실패로 처리 (안전하게)
+                            logger.error(f"❌ 메시지 고정 실패: 알 수 없는 에러 (그룹: {group_id}): {pin_error}")
+                            logger.error(f"   → 메시지 전송 여부를 확인할 수 없으므로 재시도합니다.")
+                            message_actually_sent = False
                     
                     # 실제로 메시지가 전송되었는지 확인
                     if not message_actually_sent:
-                        logger.error(f"❌ 메시지 전송 실패 확인: forward_message API는 성공했지만 실제로는 메시지가 그룹에 존재하지 않습니다.")
+                        logger.error(f"❌ 메시지 전송 검증 실패: forward_message API는 성공했지만 실제로는 메시지가 그룹에 존재하지 않거나 확인할 수 없습니다.")
                         logger.error(f"   그룹: {group_id}, 원본 메시지 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}")
                         if retry_count < max_retries - 1:
                             retry_count += 1
                             logger.info(f"🔄 재시도 예정... (재시도 횟수: {retry_count}/{max_retries - 1})")
                             continue
                         else:
-                            logger.error(f"❌ 최종 전송 실패: 모든 재시도 실패")
+                            logger.error(f"❌ 최종 전송 실패: 모든 재시도 실패 (메시지가 전송되지 않았습니다)")
                             failed_groups.append(group_id)
                             break
                     
@@ -852,14 +850,15 @@ class TelegramChannelForwarder:
     
     
     async def load_message_ids_from_file(self):
-        """파일에서 메시지 ID 목록 불러오기"""
+        """파일에서 메시지 ID 목록 불러오기 (중복 제거)"""
+        global channel_message_ids
         try:
             from pathlib import Path
             ids_file = Path(__file__).parent / 'message_ids.txt'
             logger.info(f"메시지 ID 파일 경로: {ids_file.absolute()}")
             
             if ids_file.exists():
-                loaded_count = 0
+                loaded_ids = set()  # 중복 제거를 위해 set 사용
                 file_content = []
                 with open(ids_file, 'r', encoding='utf-8') as f:
                     for line in f:
@@ -869,18 +868,23 @@ class TelegramChannelForwarder:
                         if line and not line.startswith('#'):
                             try:
                                 msg_id = int(line)
-                                if msg_id not in channel_message_ids:
-                                    channel_message_ids.append(msg_id)
-                                    loaded_count += 1
-                                    logger.debug(f"메시지 ID {msg_id} 로드됨")
+                                loaded_ids.add(msg_id)  # set에 추가 (자동 중복 제거)
                             except ValueError as ve:
                                 logger.debug(f"라인 '{line}'을 정수로 변환 실패: {ve}")
                                 continue
                 
+                # 기존 리스트와 병합하면서 중복 제거
+                before_count = len(channel_message_ids)
+                channel_message_ids = list(set(channel_message_ids) | loaded_ids)  # 중복 제거된 합집합
+                after_count = len(channel_message_ids)
+                new_count = after_count - before_count
+                
                 logger.info(f"파일 내용 (처음 10줄): {file_content[:10]}")
-                if loaded_count > 0:
-                    logger.info(f"파일에서 메시지 ID {loaded_count}개를 불러왔습니다. (총 {len(channel_message_ids)}개)")
+                if new_count > 0:
+                    logger.info(f"파일에서 메시지 ID {new_count}개를 새로 불러왔습니다. (총 {after_count}개, 중복 제거됨)")
                     logger.info(f"로드된 메시지 ID 목록: {sorted(channel_message_ids)}")
+                elif after_count > 0:
+                    logger.info(f"파일에서 메시지 ID를 불러왔지만 모두 이미 등록되어 있습니다. (총 {after_count}개)")
                 else:
                     logger.warning(f"파일에서 메시지 ID를 불러왔지만 등록된 메시지가 없습니다. (파일 내용: {file_content})")
             else:
@@ -889,9 +893,13 @@ class TelegramChannelForwarder:
             logger.error(f"메시지 ID 파일 읽기 실패: {e}", exc_info=True)
     
     async def save_message_ids_to_file(self):
-        """메시지 ID 목록을 파일에 저장 (봇 재시작 시에도 유지됨, Render에서도 자동 저장)"""
+        """메시지 ID 목록을 파일에 저장 (봇 재시작 시에도 유지됨, Render에서도 자동 저장, 중복 제거)"""
+        global channel_message_ids
         max_retries = 3
         retry_delay = 1
+        
+        # 저장 전에 중복 제거
+        channel_message_ids = list(set(channel_message_ids))  # 중복 제거
         
         for attempt in range(max_retries):
             try:
@@ -1273,10 +1281,19 @@ class TelegramChannelForwarder:
         # 파일에서 기존 메시지 ID 불러오기 (봇 재시작 시에도 유지됨)
         await self.load_message_ids_from_file()
         
+        # 중복 제거 (혹시 모를 중복 방지)
+        global channel_message_ids
+        before_dedup = len(channel_message_ids)
+        channel_message_ids = list(set(channel_message_ids))
+        after_dedup = len(channel_message_ids)
+        if before_dedup != after_dedup:
+            logger.warning(f"⚠️ 중복된 메시지 ID {before_dedup - after_dedup}개를 제거했습니다. (총 {before_dedup}개 → {after_dedup}개)")
+            await self.save_message_ids_to_file()  # 중복 제거된 목록 저장
+        
         # getUpdates는 Conflict 오류를 일으킬 수 있으므로 제거
         # 새 메시지는 handle_channel_message에서 자동으로 추가됨
         
-        logger.info(f"현재 등록된 메시지: {len(channel_message_ids)}개 (파일에서 불러옴)")
+        logger.info(f"현재 등록된 메시지: {len(channel_message_ids)}개 (파일에서 불러옴, 중복 제거됨)")
         if len(channel_message_ids) > 0:
             logger.info(f"등록된 메시지 ID: {sorted(channel_message_ids)}")
         logger.info("이제 비공개 채널에 올라오는 모든 새 메시지를 자동으로 감지하여 순환 전송합니다.")
@@ -1295,6 +1312,7 @@ class TelegramChannelForwarder:
                 cycle = 1
                 while self.is_running and channel_message_ids:  # 메시지가 있을 때만 사이클 실행
                     logger.info(f"=== {cycle}번째 사이클 시작 (총 {len(channel_message_ids)}개 메시지) ===")
+                    logger.info(f"📋 전송할 메시지 ID 목록: {sorted(channel_message_ids)}")
                     
                     # 사이클 시작 시 첫 메시지 스킵 플래그 초기화 (모든 메시지를 정상적으로 전송하기 위해)
                     # 첫 메시지 스킵 로직은 새 그룹 등록 시에만 필요하므로, 사이클에서는 모든 메시지를 전송해야 함
