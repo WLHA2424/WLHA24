@@ -223,10 +223,16 @@ class TelegramChannelForwarder:
                             except:
                                 pass
                             
-                            # 기존 메시지가 있으면 즉시 전송
+                            # 기존 메시지가 있으면 봇이 완전히 시작된 후 전송
+                            # 배포 중에는 전송하지 않음 (Conflict 방지)
                             if channel_message_ids:
-                                logger.info(f"새 그룹 등록: {group_id}, 기존 메시지 {len(channel_message_ids)}개 즉시 전송 시작")
-                                asyncio.create_task(self.send_existing_messages_to_new_group(group_id))
+                                if self.is_fully_started:
+                                    logger.info(f"새 그룹 등록: {group_id}, 기존 메시지 {len(channel_message_ids)}개 전송 시작")
+                                    asyncio.create_task(self.send_existing_messages_to_new_group(group_id))
+                                else:
+                                    logger.info(f"새 그룹 등록: {group_id}, 봇이 완전히 시작된 후 기존 메시지 전송 예정")
+                                    # 봇이 시작되면 자동으로 전송되도록 태스크 생성 (대기 포함)
+                                    asyncio.create_task(self.send_existing_messages_to_new_group(group_id))
                         else:
                             await self.application.bot.send_message(
                                 chat_id=user_id,
@@ -642,17 +648,18 @@ class TelegramChannelForwarder:
             logger.error(f"그룹 ID 파일 저장 실패: {e}")
     
     async def send_existing_messages_to_new_group(self, group_id: str):
-        """새로 등록된 그룹에 기존 메시지들을 즉시 전송 (봇이 완전히 시작된 후)"""
+        """새로 등록된 그룹에 기존 메시지들을 전송 (봇이 완전히 시작되고 배포가 완료된 후)"""
         try:
-            # 봇이 완전히 시작될 때까지 대기 (최대 30초)
-            max_wait_time = 30
-            wait_interval = 1
+            # 봇이 완전히 시작될 때까지 대기 (최대 60초, 배포 시간 고려)
+            max_wait_time = 60
+            wait_interval = 2
             waited = 0
             
             while not self.is_fully_started and waited < max_wait_time:
                 await asyncio.sleep(wait_interval)
                 waited += wait_interval
-                logger.debug(f"봇 시작 대기 중... ({waited}초)")
+                if waited % 10 == 0:  # 10초마다 로그
+                    logger.info(f"봇 시작 대기 중... ({waited}/{max_wait_time}초)")
             
             if not self.is_fully_started:
                 logger.warning(f"봇이 {max_wait_time}초 내에 시작되지 않았습니다. 기존 메시지 전송을 건너뜁니다.")
@@ -661,6 +668,15 @@ class TelegramChannelForwarder:
             # application이 초기화되었는지 확인
             if not self.application or not self.application.bot:
                 logger.warning("봇 application이 초기화되지 않았습니다. 기존 메시지 전송을 건너뜁니다.")
+                return
+            
+            # 추가 안정성 확인: 봇이 실제로 작동하는지 테스트
+            try:
+                await asyncio.sleep(3)  # 배포 완료 후 안정화 대기
+                # 간단한 API 호출로 봇 상태 확인
+                await self.application.bot.get_me()
+            except Exception as e:
+                logger.warning(f"봇 상태 확인 실패, 전송을 건너뜁니다: {e}")
                 return
             
             if not channel_message_ids:
