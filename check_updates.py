@@ -36,3 +36,6 @@ if data.get("ok") and data.get("result"):
 else:
     print("업데이트를 가져올 수 없습니다.")
 
+
+
+
