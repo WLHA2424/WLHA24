@@ -45,6 +45,9 @@ channel_message_ids: List[int] = []
 # 등록된 그룹 ID 목록 (동적으로 추가 가능)
 registered_group_ids: List[str] = []
 
+# 새로 등록된 그룹에 첫 메시지 전송 완료 여부 (group_id: bool)
+new_group_first_message_sent: dict = {}
+
 # 비밀번호 입력 대기 중인 사용자 (user_id: group_id)
 pending_registrations: dict = {}
 
@@ -223,16 +226,18 @@ class TelegramChannelForwarder:
                             except:
                                 pass
                             
-                            # 기존 메시지가 있으면 봇이 완전히 시작된 후 전송
-                            # 배포 중에는 전송하지 않음 (Conflict 방지)
+                            # 새 그룹 등록 시 첫 메시지만 즉시 전송 (중복 방지)
                             if channel_message_ids:
+                                # 첫 메시지만 즉시 전송
+                                first_message_id = channel_message_ids[0]
+                                new_group_first_message_sent[group_id] = False  # 첫 메시지 전송 플래그 초기화
+                                
                                 if self.is_fully_started:
-                                    logger.info(f"새 그룹 등록: {group_id}, 기존 메시지 {len(channel_message_ids)}개 전송 시작")
-                                    asyncio.create_task(self.send_existing_messages_to_new_group(group_id))
+                                    logger.info(f"새 그룹 등록: {group_id}, 첫 메시지만 즉시 전송합니다.")
+                                    asyncio.create_task(self.send_first_message_to_new_group(group_id, first_message_id))
                                 else:
-                                    logger.info(f"새 그룹 등록: {group_id}, 봇이 완전히 시작된 후 기존 메시지 전송 예정")
-                                    # 봇이 시작되면 자동으로 전송되도록 태스크 생성 (대기 포함)
-                                    asyncio.create_task(self.send_existing_messages_to_new_group(group_id))
+                                    logger.info(f"새 그룹 등록: {group_id}, 봇이 완전히 시작된 후 첫 메시지 전송 예정")
+                                    asyncio.create_task(self.send_first_message_to_new_group(group_id, first_message_id))
                         else:
                             await self.application.bot.send_message(
                                 chat_id=user_id,
@@ -495,7 +500,7 @@ class TelegramChannelForwarder:
     
     async def forward_message(self, msg_data: dict):
         """개별 메시지를 모든 등록된 그룹으로 전달 (텔레그램 forward API 사용)"""
-        global registered_group_ids
+        global registered_group_ids, new_group_first_message_sent, channel_message_ids
         
         if not registered_group_ids:
             logger.warning("등록된 그룹이 없습니다. 그룹에서 /월하 명령어를 사용하세요.")
@@ -504,7 +509,14 @@ class TelegramChannelForwarder:
         success_count = 0
         failed_groups = []
         
+        # 첫 메시지인지 확인 (중복 방지)
+        is_first_message = (channel_message_ids and msg_data['message_id'] == channel_message_ids[0])
+        
         for group_id in registered_group_ids:
+            # 첫 메시지이고 새로 등록된 그룹에 이미 전송했다면 스킵 (중복 방지)
+            if is_first_message and new_group_first_message_sent.get(group_id, False):
+                logger.debug(f"그룹 {group_id}에 첫 메시지는 이미 전송되었습니다. 스킵합니다.")
+                continue
             try:
                 logger.info(f"메시지 전달 시도: 채널={msg_data['chat_id']}, 메시지ID={msg_data['message_id']}, 그룹={group_id}")
                 
@@ -646,6 +658,95 @@ class TelegramChannelForwarder:
             logger.debug(f"그룹 ID {len(registered_group_ids)}개를 파일에 저장했습니다.")
         except Exception as e:
             logger.error(f"그룹 ID 파일 저장 실패: {e}")
+    
+    async def send_first_message_to_new_group(self, group_id: str, message_id: int):
+        """새로 등록된 그룹에 첫 메시지만 즉시 전송 (중복 방지)"""
+        global new_group_first_message_sent
+        
+        try:
+            # 봇이 완전히 시작될 때까지 대기 (최대 60초, 배포 시간 고려)
+            max_wait_time = 60
+            wait_interval = 2
+            waited = 0
+            
+            while not self.is_fully_started and waited < max_wait_time:
+                await asyncio.sleep(wait_interval)
+                waited += wait_interval
+                if waited % 10 == 0:  # 10초마다 로그
+                    logger.info(f"봇 시작 대기 중... ({waited}/{max_wait_time}초)")
+            
+            if not self.is_fully_started:
+                logger.warning(f"봇이 {max_wait_time}초 내에 시작되지 않았습니다. 첫 메시지 전송을 건너뜁니다.")
+                return
+            
+            # application이 초기화되었는지 확인
+            if not self.application or not self.application.bot:
+                logger.warning("봇 application이 초기화되지 않았습니다. 첫 메시지 전송을 건너뜁니다.")
+                return
+            
+            # 추가 안정성 확인: 봇이 실제로 작동하는지 테스트
+            try:
+                await asyncio.sleep(3)  # 배포 완료 후 안정화 대기
+                await self.application.bot.get_me()
+            except Exception as e:
+                logger.warning(f"봇 상태 확인 실패, 전송을 건너뜁니다: {e}")
+                return
+            
+            # 이미 전송했는지 확인 (중복 방지)
+            if new_group_first_message_sent.get(group_id, False):
+                logger.info(f"그룹 {group_id}에 첫 메시지는 이미 전송되었습니다.")
+                return
+            
+            message_data = {
+                'chat_id': int(SOURCE_CHANNEL_ID),
+                'message_id': message_id,
+                'date': None
+            }
+            
+            # 재시도 로직 (최대 3회)
+            max_retries = 3
+            retry_delay = 2
+            
+            for attempt in range(max_retries):
+                try:
+                    # 특정 그룹에만 전송
+                    result = await self.application.bot.forward_message(
+                        chat_id=group_id,
+                        from_chat_id=message_data['chat_id'],
+                        message_id=message_data['message_id']
+                    )
+                    
+                    # 메시지 고정
+                    try:
+                        await self.application.bot.pin_chat_message(
+                            chat_id=group_id,
+                            message_id=result.message_id
+                        )
+                    except:
+                        pass
+                    
+                    # 전송 완료 플래그 설정
+                    new_group_first_message_sent[group_id] = True
+                    logger.info(f"[새 그룹 첫 메시지] 그룹 {group_id}에 전송 완료 (ID: {message_id})")
+                    break  # 성공하면 재시도 루프 종료
+                    
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    
+                    # 메시지가 존재하지 않는 경우 재시도 불필요
+                    if "message to forward not found" in error_msg or "message not found" in error_msg:
+                        logger.warning(f"메시지 {message_id}가 채널에 존재하지 않습니다. 건너뜁니다.")
+                        break
+                    
+                    # 네트워크 오류나 일시적 오류인 경우 재시도
+                    if attempt < max_retries - 1:
+                        logger.warning(f"첫 메시지 전송 실패 (그룹: {group_id}, ID: {message_id}, 시도 {attempt + 1}/{max_retries}): {e}")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error(f"첫 메시지 전송 최종 실패 (그룹: {group_id}, ID: {message_id}): {e}")
+            
+        except Exception as e:
+            logger.error(f"첫 메시지 전송 중 오류: {e}", exc_info=True)
     
     async def send_existing_messages_to_new_group(self, group_id: str):
         """새로 등록된 그룹에 기존 메시지들을 전송 (봇이 완전히 시작되고 배포가 완료된 후)"""
