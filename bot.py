@@ -592,14 +592,17 @@ class TelegramChannelForwarder:
                             if idx < len(channel_message_ids):
                                 await asyncio.sleep(current_message_interval)
                     
-                    # 한 사이클 완료 후 처음부터 다시 시작 (대기 없이 바로)
+                    # 한 사이클 완료 후 재전송 대기 시간만큼 대기 후 다시 시작
                     # 메시지가 없으면 사이클 종료
                     if not channel_message_ids:
                         logger.info("등록된 메시지가 없어 사이클을 종료합니다.")
                         break
-                    logger.info(f"=== {cycle}번째 사이클 완료. 처음부터 다시 시작합니다 ===")
+                    
+                    # 사이클 간 재전송 대기 시간 적용
+                    resend_wait_min = current_resend_wait_time // 60
+                    logger.info(f"=== {cycle}번째 사이클 완료. 다음 사이클까지 {resend_wait_min}분 대기 중... ===")
+                    await asyncio.sleep(current_resend_wait_time)
                     cycle += 1
-                    # 사이클 간 대기 없음 - 바로 다음 사이클 시작 (1시간 체크는 각 메시지에서 처리)
                     
             except Exception as e:
                 logger.error(f"기존 메시지 가져오기 중 오류: {e}", exc_info=True)
