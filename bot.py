@@ -265,11 +265,6 @@ class TelegramChannelForwarder:
                                 chat_id=user_id,
                                 text=f"ℹ️ 이 그룹은 이미 등록되어 있습니다.\n그룹 ID: {group_id}"
                             )
-                        else:
-                            await self.application.bot.send_message(
-                                chat_id=user_id,
-                                text=f"ℹ️ 이 그룹은 이미 등록되어 있습니다.\n그룹 ID: {group_id}"
-                            )
                         
                         # 대기 상태 제거
                         del pending_registrations[user_id]
