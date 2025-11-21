@@ -25,3 +25,6 @@ SEND_INTERVAL_HOURS = float(os.environ.get("SEND_INTERVAL_HOURS", "0.0"))
 # 전송 간격 (분 단위로도 설정 가능, 기본값: 1분)
 SEND_INTERVAL_MINUTES = float(os.environ.get("SEND_INTERVAL_MINUTES", "1.0"))
 
+# 그룹 등록 비밀번호 (환경변수 우선, 없으면 기본값)
+REGISTER_PASSWORD = os.environ.get("REGISTER_PASSWORD", "asd0203")
+
