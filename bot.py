@@ -61,7 +61,7 @@ EXISTING_MESSAGE_INTERVAL = 600  # 10분
 RESEND_WAIT_TIME = 3600  # 1시간
 
 # 전역 변수로 설정값 저장 (명령어로 변경 가능)
-current_message_interval = 600  # 10분
+current_message_interval = 300  # 5분 (기본값)
 current_resend_wait_time = 3600  # 1시간
 
 class TelegramChannelForwarder:
@@ -85,6 +85,9 @@ class TelegramChannelForwarder:
         
         # 파일에서 저장된 그룹 목록 불러오기
         await self.load_groups_from_file()
+        
+        # 파일에서 설정값 불러오기
+        await self.load_settings_from_file()
         
         logger.info(f"등록된 그룹: {len(registered_group_ids)}개 - {registered_group_ids}")
             
@@ -233,11 +236,15 @@ class TelegramChannelForwarder:
                                 first_message_id = channel_message_ids[0]
                                 new_group_first_message_sent[group_id] = False  # 첫 메시지 전송 플래그 초기화
                                 
+                                logger.info(f"🆕 새 그룹 등록 완료: {group_id}")
+                                logger.info(f"📤 첫 메시지 즉시 전송 시작 (ID: {first_message_id})")
+                                logger.info(f"⏱️ 이후 메시지는 {current_message_interval // 60}분 간격으로 전송됩니다.")
+                                
                                 if self.is_fully_started:
-                                    logger.info(f"새 그룹 등록: {group_id}, 첫 메시지만 즉시 전송합니다.")
+                                    logger.info(f"✅ 봇이 실행 중입니다. 첫 메시지 즉시 전송합니다.")
                                     asyncio.create_task(self.send_first_message_to_new_group(group_id, first_message_id))
                                 else:
-                                    logger.info(f"새 그룹 등록: {group_id}, 봇이 완전히 시작된 후 첫 메시지 전송 예정")
+                                    logger.info(f"⏳ 봇이 완전히 시작된 후 첫 메시지 전송 예정")
                                     asyncio.create_task(self.send_first_message_to_new_group(group_id, first_message_id))
                         else:
                             await self.application.bot.send_message(
@@ -278,35 +285,95 @@ class TelegramChannelForwarder:
             await self.application.start()
             
             # Webhook이 설정되어 있으면 삭제 (Conflict 방지)
+            logger.info("🔍 Webhook 상태 확인 중...")
             try:
                 # 여러 번 시도하여 확실히 삭제
-                for attempt in range(3):
+                webhook_deleted = False
+                for attempt in range(10):  # 5회에서 10회로 증가
                     try:
                         webhook_info = await self.application.bot.get_webhook_info()
                         if webhook_info.url:
-                            logger.info(f"Webhook 발견: {webhook_info.url}, 삭제 중...")
+                            logger.info(f"🔗 Webhook 발견: {webhook_info.url}, 삭제 중... (시도: {attempt + 1}/10)")
                             await self.application.bot.delete_webhook(drop_pending_updates=True)
-                            await asyncio.sleep(1)  # 삭제 후 잠시 대기
-                        logger.info("Webhook 삭제 완료 (Polling 모드 사용)")
-                        break
-                    except Exception as e:
-                        if attempt < 2:
-                            logger.warning(f"Webhook 삭제 시도 {attempt + 1}/3 실패, 재시도 중...: {e}")
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(3)  # 삭제 후 대기 시간 증가
+                            # 삭제 확인
+                            webhook_info_after = await self.application.bot.get_webhook_info()
+                            if not webhook_info_after.url:
+                                logger.info("✅ Webhook 삭제 완료 (Polling 모드 사용)")
+                                webhook_deleted = True
+                                break
+                            else:
+                                logger.warning(f"⚠️ Webhook 삭제 후에도 여전히 존재합니다. 재시도 중... (시도: {attempt + 1}/10)")
                         else:
-                            logger.warning(f"Webhook 삭제 최종 실패 (무시): {e}")
+                            logger.info("✅ Webhook이 없습니다. Polling 모드 사용 가능")
+                            webhook_deleted = True
+                            break
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "conflict" in error_msg:
+                            wait_time = min(5 + attempt * 2, 15)  # 최대 15초까지 증가
+                            logger.warning(f"⚠️ Conflict 에러 발생. {wait_time}초 대기 후 재시도... (시도: {attempt + 1}/10)")
+                            await asyncio.sleep(wait_time)
+                        elif attempt < 9:
+                            wait_time = min(3 + attempt, 10)
+                            logger.warning(f"⚠️ Webhook 삭제 시도 {attempt + 1}/10 실패, {wait_time}초 후 재시도...: {e}")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logger.warning(f"⚠️ Webhook 삭제 최종 실패 (무시하고 계속 진행): {e}")
+                            break
+                
+                if not webhook_deleted:
+                    logger.warning("⚠️ Webhook 삭제를 완료하지 못했지만 계속 진행합니다.")
             except Exception as e:
-                logger.warning(f"Webhook 확인 중 오류 (무시): {e}")
+                logger.warning(f"⚠️ Webhook 확인 중 오류 (무시하고 계속 진행): {e}")
             
             # Polling 시작 전 충분한 대기 시간 (배포 중 이전 인스턴스 종료 대기)
-            await asyncio.sleep(5)
+            logger.info("⏳ 이전 인스턴스 종료 대기 중... (10초)")
+            await asyncio.sleep(10)  # 5초에서 10초로 증가
             
-            await self.application.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True
-            )
-            logger.info("✅ 봇이 완전히 시작되었습니다!")
-            self.is_fully_started = True  # 봇 시작 완료 플래그 설정
+            # 추가 안전 장치: Webhook 재확인 및 삭제
+            try:
+                webhook_info_final = await self.application.bot.get_webhook_info()
+                if webhook_info_final.url:
+                    logger.warning(f"⚠️ Webhook이 여전히 존재합니다: {webhook_info_final.url}, 강제 삭제 시도...")
+                    await self.application.bot.delete_webhook(drop_pending_updates=True)
+                    await asyncio.sleep(2)
+            except Exception as e:
+                logger.warning(f"⚠️ 최종 Webhook 확인 중 오류 (무시): {e}")
+            
+            # Polling 시작 (Conflict 에러는 자동으로 재시도됨)
+            logger.info("🚀 Polling 시작 중...")
+            try:
+                await self.application.updater.start_polling(
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=True,
+                    close_loop=False  # 루프를 닫지 않음
+                )
+                logger.info("✅ 봇이 완전히 시작되었습니다!")
+                self.is_fully_started = True  # 봇 시작 완료 플래그 설정
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "conflict" in error_msg:
+                    logger.error(f"❌ Polling 시작 중 Conflict 에러 발생: {e}")
+                    logger.info("⏳ 15초 대기 후 재시도...")
+                    await asyncio.sleep(15)
+                    # 재시도
+                    try:
+                        await self.application.bot.delete_webhook(drop_pending_updates=True)
+                        await asyncio.sleep(3)
+                        await self.application.updater.start_polling(
+                            allowed_updates=Update.ALL_TYPES,
+                            drop_pending_updates=True,
+                            close_loop=False
+                        )
+                        logger.info("✅ 봇이 재시도 후 시작되었습니다!")
+                        self.is_fully_started = True
+                    except Exception as retry_error:
+                        logger.error(f"❌ 재시도도 실패: {retry_error}")
+                        raise
+                else:
+                    logger.error(f"❌ Polling 시작 실패: {e}")
+                    raise
             
             # 기존 채널 메시지를 순차적으로 전송하는 작업 시작
             asyncio.create_task(self.send_existing_messages_sequentially())
@@ -341,9 +408,12 @@ class TelegramChannelForwarder:
                 await self.send_command_response(update, "간격은 1분 이상이어야 합니다.")
                 return
             
+            old_interval = current_message_interval
             current_message_interval = minutes * 60  # 분을 초로 변환
-            logger.info(f"메시지 간 전송 간격이 {minutes}분으로 변경되었습니다.")
-            await self.send_command_response(update, f"✅ 메시지 간 전송 간격이 {minutes}분으로 설정되었습니다.")
+            logger.info(f"⚙️ 메시지 간격 변경: {old_interval // 60}분 → {minutes}분 (즉시 적용됨)")
+            # 설정값을 파일에 저장
+            await self.save_settings_to_file()
+            await self.send_command_response(update, f"✅ 메시지 간 전송 간격이 {minutes}분으로 설정되었습니다.\n💡 다음 메시지부터 즉시 적용됩니다. (저장 완료)")
         except ValueError:
             await self.send_command_response(update, "❌ 잘못된 형식입니다. 숫자를 입력하세요.\n예: /간격 10")
         except Exception as e:
@@ -365,9 +435,12 @@ class TelegramChannelForwarder:
                 await self.send_command_response(update, "간격은 1분 이상이어야 합니다.")
                 return
             
+            old_resend = current_resend_wait_time
             current_resend_wait_time = minutes * 60  # 분을 초로 변환
-            logger.info(f"같은 메시지 재전송 간격이 {minutes}분으로 변경되었습니다.")
-            await self.send_command_response(update, f"✅ 같은 메시지 재전송 간격이 {minutes}분으로 설정되었습니다.")
+            logger.info(f"⚙️ 재전송 간격 변경: {old_resend // 60}분 → {minutes}분 (다음 사이클부터 적용됨)")
+            # 설정값을 파일에 저장
+            await self.save_settings_to_file()
+            await self.send_command_response(update, f"✅ 같은 메시지 재전송 간격이 {minutes}분으로 설정되었습니다.\n💡 다음 사이클부터 적용됩니다. (저장 완료)")
         except ValueError:
             await self.send_command_response(update, "❌ 잘못된 형식입니다. 숫자를 입력하세요.\n예: /재전송 60")
         except Exception as e:
@@ -377,6 +450,7 @@ class TelegramChannelForwarder:
     async def handle_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """현재 설정 상태 확인 명령어"""
         global current_message_interval, current_resend_wait_time
+        import os
         
         interval_min = current_message_interval // 60
         resend_min = current_resend_wait_time // 60
@@ -384,11 +458,21 @@ class TelegramChannelForwarder:
         # 등록된 메시지 수 (실제 전송 시 존재하지 않으면 자동 제거됨)
         message_count = len(channel_message_ids)
         
+        # 설정 소스 확인
+        env_interval = os.environ.get("MESSAGE_INTERVAL_SECONDS")
+        env_resend = os.environ.get("RESEND_WAIT_TIME_SECONDS")
+        source_info = ""
+        if env_interval or env_resend:
+            source_info = "\n💡 설정 소스: 환경 변수 (Render 재시작 후에도 유지)"
+        else:
+            source_info = "\n💡 설정 소스: 파일 (Render 재시작 시 초기화될 수 있음)"
+            source_info += "\n   영구 저장을 원하면 Render 대시보드에서 환경 변수 설정 권장"
+        
         status_text = f"""📊 현재 봇 설정 상태
 
-⏱️ 메시지 간 전송 간격: {interval_min}분
-🔄 같은 메시지 재전송 간격: {resend_min}분
-📝 등록된 메시지 수: {message_count}개
+⏱️ 메시지 간 전송 간격: {interval_min}분 ({current_message_interval}초)
+🔄 같은 메시지 재전송 간격: {resend_min}분 ({current_resend_wait_time}초)
+📝 등록된 메시지 수: {message_count}개{source_info}
 
 명령어:
 /간격 [분] - 메시지 간 전송 간격 설정
@@ -415,11 +499,11 @@ class TelegramChannelForwarder:
             message = update.channel_post or update.message
             
             if not message:
-                logger.warning("메시지가 없습니다.")
+                logger.warning("⚠️ 메시지가 없습니다.")
                 return
             
             message_id = message.message_id
-            logger.info(f"채널 메시지 수신: ID={message_id}, 채널={message.chat.id}")
+            logger.info(f"📥 채널 메시지 수신: ID={message_id}, 채널={message.chat.id}")
             
             # 설정된 재전송 간격 내에 이미 전송한 메시지인지 확인
             import time
@@ -432,7 +516,13 @@ class TelegramChannelForwarder:
                     wait_remaining = current_resend_wait_time - time_since_sent
                     wait_minutes = int(wait_remaining / 60)
                     resend_min = current_resend_wait_time // 60
-                    logger.info(f"메시지 {message_id}는 {wait_minutes}분 전에 전송되었습니다. {resend_min}분 대기 중...")
+                    logger.info(f"⏳ 메시지 {message_id}는 {wait_minutes}분 전에 전송되었습니다. {resend_min}분 대기 중... (새 메시지이지만 재전송 간격 내)")
+                    # 새 메시지이지만 재전송 간격 내이면 스킵 (다음 사이클에서 전송됨)
+                    # 하지만 channel_message_ids에는 추가해야 함
+                    if message_id not in channel_message_ids:
+                        channel_message_ids.append(message_id)
+                        await self.save_message_ids_to_file()
+                        logger.info(f"📨 메시지 ID 추가됨 (다음 사이클에서 전송): {message_id}")
                     return
             
             # 메시지 정보 저장 (전달에 필요한 최소 정보만)
@@ -446,26 +536,44 @@ class TelegramChannelForwarder:
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    await self.forward_message(message_data)
-                    # 전송 성공 시 기록
-                    sent_messages[message_id] = current_time
+                    logger.info(f"🚀 새 메시지 즉시 전송 시도 {attempt + 1}/{max_retries} (ID: {message_id})")
+                    success = await self.forward_message(message_data)
                     
-                    # 메시지 ID를 채널 메시지 목록에 추가 (없으면)
-                    if message_id not in channel_message_ids:
-                        channel_message_ids.append(message_id)
-                        logger.info(f"📨 새 메시지 ID 추가: {message_id} (총 {len(channel_message_ids)}개)")
-                        # 파일에 자동 저장 (Render에서도 영구 저장)
-                        await self.save_message_ids_to_file()
-                        logger.info(f"💾 메시지 ID 목록이 파일에 저장되었습니다.")
-                    
-                    logger.info(f"메시지 즉시 전송 완료 (ID: {message_id})")
-                    return  # 성공하면 종료
+                    if success:
+                        # 전송 성공 시 기록
+                        sent_messages[message_id] = current_time
+                        
+                        # 메시지 ID를 채널 메시지 목록에 추가 (없으면)
+                        if message_id not in channel_message_ids:
+                            channel_message_ids.append(message_id)
+                            logger.info(f"📨 새 메시지 ID 추가: {message_id} (총 {len(channel_message_ids)}개)")
+                            # 파일에 자동 저장 (Render에서도 영구 저장)
+                            await self.save_message_ids_to_file()
+                            logger.info(f"💾 메시지 ID 목록이 파일에 저장되었습니다.")
+                        
+                        logger.info(f"✅ 새 메시지 즉시 전송 완료 (ID: {message_id})")
+                        return  # 성공하면 종료
+                    else:
+                        logger.warning(f"⚠️ 전송 실패 (success=False): {message_id}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(1)  # 1초 대기 후 재시도
+                        else:
+                            # 실패해도 메시지 ID는 추가 (다음 사이클에서 재시도)
+                            if message_id not in channel_message_ids:
+                                channel_message_ids.append(message_id)
+                                await self.save_message_ids_to_file()
+                                logger.info(f"📨 전송 실패했지만 메시지 ID 추가됨 (다음 사이클에서 재시도): {message_id}")
                 except Exception as e:
-                    logger.warning(f"전송 시도 {attempt + 1}/{max_retries} 실패: {e}")
+                    logger.error(f"❌ 전송 시도 {attempt + 1}/{max_retries} 실패: {e}", exc_info=True)
                     if attempt < max_retries - 1:
                         await asyncio.sleep(1)  # 1초 대기 후 재시도
                     else:
-                        logger.error(f"최종 전송 실패, 큐에 추가: {e}")
+                        logger.error(f"❌ 최종 전송 실패, 메시지 ID는 추가하여 다음 사이클에서 재시도: {e}")
+                        # 실패해도 메시지 ID는 추가 (다음 사이클에서 재시도)
+                        if message_id not in channel_message_ids:
+                            channel_message_ids.append(message_id)
+                            await self.save_message_ids_to_file()
+                            logger.info(f"📨 전송 실패했지만 메시지 ID 추가됨 (다음 사이클에서 재시도): {message_id}")
                         message_queue.put(message_data)
             
         except Exception as e:
@@ -519,49 +627,96 @@ class TelegramChannelForwarder:
             if is_first_message and new_group_first_message_sent.get(group_id, False):
                 logger.debug(f"그룹 {group_id}에 첫 메시지는 이미 전송되었습니다. 스킵합니다.")
                 continue
-            try:
-                logger.info(f"메시지 전달 시도: 채널={msg_data['chat_id']}, 메시지ID={msg_data['message_id']}, 그룹={group_id}")
-                
-                # 텔레그램의 forward_message API를 사용하여 원본 메시지를 그대로 전달
-                result = await self.application.bot.forward_message(
-                    chat_id=group_id,
-                    from_chat_id=msg_data['chat_id'],
-                    message_id=msg_data['message_id']
-                )
-                logger.info(f"메시지 전달 성공! (ID: {msg_data['message_id']}, 그룹: {group_id})")
-                
-                # 전달한 메시지를 고정 (pin)
+            # 타임아웃 에러 재시도를 위한 루프
+            max_retries = 3
+            retry_count = 0
+            success = False
+            
+            while retry_count < max_retries and not success:
                 try:
-                    forwarded_message_id = result.message_id
-                    await self.application.bot.pin_chat_message(
+                    if retry_count > 0:
+                        logger.info(f"🔄 메시지 전달 재시도 {retry_count}/{max_retries - 1}: 채널={msg_data['chat_id']}, 메시지ID={msg_data['message_id']}, 그룹={group_id}")
+                        await asyncio.sleep(2 * retry_count)  # 재시도 간격 증가
+                    else:
+                        logger.info(f"📤 메시지 전달 시도: 채널={msg_data['chat_id']}, 메시지ID={msg_data['message_id']}, 그룹={group_id}")
+                    
+                    # 텔레그램의 forward_message API를 사용하여 원본 메시지를 그대로 전달
+                    result = await self.application.bot.forward_message(
                         chat_id=group_id,
-                        message_id=forwarded_message_id
+                        from_chat_id=msg_data['chat_id'],
+                        message_id=msg_data['message_id']
                     )
-                    logger.info(f"메시지 고정 완료! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
-                except Exception as pin_error:
-                    logger.warning(f"메시지 고정 실패 (그룹: {group_id}): {pin_error} (봇이 그룹에서 메시지를 고정할 권한이 없을 수 있습니다)")
-                
-                success_count += 1
-                # API 제한을 피하기 위해 약간의 지연
-                await asyncio.sleep(0.3)
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                logger.error(f"메시지 전달 실패 (그룹: {group_id}, ID: {msg_data['message_id']}): {error_msg}")
-                
-                # 그룹을 찾을 수 없거나 봇이 제거된 경우 목록에서 제거
-                if "chat not found" in error_msg or "bot was kicked" in error_msg or "bot was blocked" in error_msg:
-                    logger.warning(f"그룹 {group_id}을 찾을 수 없거나 봇이 제거되었습니다. 목록에서 제거합니다.")
-                    if group_id in registered_group_ids:
-                        registered_group_ids.remove(group_id)
-                        await self.save_groups_to_file()
-                        logger.info(f"💾 그룹 제거 후 목록이 파일에 저장되었습니다: {registered_group_ids}")
-                    failed_groups.append(group_id)
-                elif "forbidden" in error_msg:
-                    logger.warning(f"그룹 {group_id}에서 권한이 없습니다. (메시지 전송 권한 필요)")
-                    failed_groups.append(group_id)
-                else:
-                    failed_groups.append(group_id)
+                    
+                    # result 객체 확인
+                    if result is None:
+                        logger.error(f"❌ 메시지 전달 실패: result가 None입니다 (그룹: {group_id}, ID: {msg_data['message_id']})")
+                        if retry_count < max_retries - 1:
+                            retry_count += 1
+                            continue
+                        else:
+                            failed_groups.append(group_id)
+                            break
+                    
+                    if not hasattr(result, 'message_id') or result.message_id is None:
+                        logger.error(f"❌ 메시지 전달 실패: message_id가 없습니다 (그룹: {group_id}, ID: {msg_data['message_id']})")
+                        if retry_count < max_retries - 1:
+                            retry_count += 1
+                            continue
+                        else:
+                            failed_groups.append(group_id)
+                            break
+                    
+                    forwarded_message_id = result.message_id
+                    logger.info(f"✅ 메시지 전달 성공! (원본 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}, 그룹: {group_id})")
+                    
+                    # 전달한 메시지를 고정 (pin)
+                    try:
+                        await self.application.bot.pin_chat_message(
+                            chat_id=group_id,
+                            message_id=forwarded_message_id
+                        )
+                        logger.info(f"📌 메시지 고정 완료! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                    except Exception as pin_error:
+                        logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}): {pin_error} (봇이 그룹에서 메시지를 고정할 권한이 없을 수 있습니다)")
+                    
+                    success_count += 1
+                    success = True
+                    # API 제한을 피하기 위해 약간의 지연
+                    await asyncio.sleep(0.3)
+                    break  # 성공 시 루프 종료
+                    
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    full_error = str(e)
+                    
+                    # 타임아웃 에러는 재시도
+                    if ("timed out" in error_msg or "timeout" in error_msg) and retry_count < max_retries - 1:
+                        logger.warning(f"⏱️ 타임아웃 발생 (시도: {retry_count + 1}/{max_retries}). 재시도 중...")
+                        retry_count += 1
+                        continue  # 재시도
+                    # 그룹을 찾을 수 없거나 봇이 제거된 경우 목록에서 제거 (재시도 안 함)
+                    elif "chat not found" in error_msg or "bot was kicked" in error_msg or "bot was blocked" in error_msg:
+                        logger.warning(f"그룹 {group_id}을 찾을 수 없거나 봇이 제거되었습니다. 목록에서 제거합니다.")
+                        if group_id in registered_group_ids:
+                            registered_group_ids.remove(group_id)
+                            await self.save_groups_to_file()
+                            logger.info(f"💾 그룹 제거 후 목록이 파일에 저장되었습니다: {registered_group_ids}")
+                        failed_groups.append(group_id)
+                        break  # 재시도 안 함
+                    elif "forbidden" in error_msg:
+                        logger.warning(f"그룹 {group_id}에서 권한이 없습니다. (메시지 전송 권한 필요)")
+                        failed_groups.append(group_id)
+                        break  # 재시도 안 함
+                    else:
+                        # 다른 에러도 재시도 (최대 횟수까지)
+                        if retry_count < max_retries - 1:
+                            logger.warning(f"⚠️ 메시지 전달 실패 (시도: {retry_count + 1}/{max_retries}): {full_error}. 재시도 중...")
+                            retry_count += 1
+                            continue  # 재시도
+                        else:
+                            logger.error(f"❌ 메시지 전달 최종 실패 (그룹: {group_id}, ID: {msg_data['message_id']}): {full_error}")
+                            failed_groups.append(group_id)
+                            break  # 최대 재시도 횟수 초과
         
         if success_count > 0:
             logger.info(f"메시지 전달 완료: {success_count}개 그룹에 전송됨 (실패: {len(failed_groups)}개)")
@@ -705,6 +860,103 @@ class TelegramChannelForwarder:
                     await asyncio.sleep(retry_delay)
                 else:
                     logger.error(f"❌ 그룹 ID 파일 저장 최종 실패 ({max_retries}회 시도): {e}", exc_info=True)
+    
+    async def load_settings_from_file(self):
+        """설정값 불러오기 (우선순위: 환경 변수 > 파일 > 기본값)"""
+        global current_message_interval, current_resend_wait_time
+        import os
+        
+        # 1. 환경 변수에서 먼저 확인 (Render 대시보드에서 설정한 값)
+        env_interval = os.environ.get("MESSAGE_INTERVAL_SECONDS")
+        env_resend = os.environ.get("RESEND_WAIT_TIME_SECONDS")
+        
+        if env_interval:
+            try:
+                current_message_interval = int(env_interval)
+                logger.info(f"✅ 환경 변수에서 설정 로드: 메시지 간격 = {current_message_interval // 60}분")
+            except ValueError:
+                logger.warning(f"⚠️ 환경 변수 MESSAGE_INTERVAL_SECONDS 파싱 실패: {env_interval}")
+        
+        if env_resend:
+            try:
+                current_resend_wait_time = int(env_resend)
+                logger.info(f"✅ 환경 변수에서 설정 로드: 재전송 간격 = {current_resend_wait_time // 60}분")
+            except ValueError:
+                logger.warning(f"⚠️ 환경 변수 RESEND_WAIT_TIME_SECONDS 파싱 실패: {env_resend}")
+        
+        # 2. 환경 변수가 없으면 파일에서 로드
+        if not env_interval or not env_resend:
+            try:
+                from pathlib import Path
+                settings_file = Path(__file__).parent / 'settings.txt'
+                if settings_file.exists():
+                    with open(settings_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#'):
+                                if '=' in line:
+                                    key, value = line.split('=', 1)
+                                    key = key.strip()
+                                    value = value.strip()
+                                    try:
+                                        if key == 'message_interval' and not env_interval:
+                                            current_message_interval = int(value)
+                                            logger.info(f"✅ 파일에서 설정 로드: 메시지 간격 = {current_message_interval // 60}분 ({current_message_interval}초)")
+                                        elif key == 'resend_wait_time' and not env_resend:
+                                            current_resend_wait_time = int(value)
+                                            logger.info(f"✅ 파일에서 설정 로드: 재전송 간격 = {current_resend_wait_time // 60}분 ({current_resend_wait_time}초)")
+                                    except ValueError:
+                                        logger.warning(f"⚠️ 설정값 파싱 실패: {key}={value}")
+                else:
+                    logger.info(f"⚠️ settings.txt 파일이 없습니다.")
+            except Exception as e:
+                logger.error(f"❌ 설정 파일 읽기 실패: {e}", exc_info=True)
+        
+        logger.info(f"📋 최종 적용된 설정: 메시지 간격={current_message_interval // 60}분, 재전송 간격={current_resend_wait_time // 60}분")
+    
+    async def save_settings_to_file(self):
+        """설정값을 파일에 저장 (메시지 간격, 재전송 간격) - Render 재시작 시 유지"""
+        global current_message_interval, current_resend_wait_time
+        import os
+        max_retries = 3
+        retry_delay = 1
+        
+        # 파일에 저장 (서비스 실행 중에는 유지됨)
+        for attempt in range(max_retries):
+            try:
+                from pathlib import Path
+                settings_file = Path(__file__).parent / 'settings.txt'
+                file_path = str(settings_file.absolute())
+                
+                with open(settings_file, 'w', encoding='utf-8') as f:
+                    f.write("# 봇 설정값 (초 단위)\n")
+                    f.write("# 메시지 간 전송 간격 (초)\n")
+                    f.write(f"message_interval={current_message_interval}\n")
+                    f.write("# 같은 메시지 재전송 간격 (초)\n")
+                    f.write(f"resend_wait_time={current_resend_wait_time}\n")
+                
+                # 파일이 제대로 저장되었는지 확인
+                if settings_file.exists():
+                    file_size = settings_file.stat().st_size
+                    logger.info(f"💾 설정값을 파일에 저장했습니다 (경로: {file_path}, 크기: {file_size} bytes)")
+                    logger.info(f"📋 저장된 설정: 메시지 간격={current_message_interval // 60}분, 재전송 간격={current_resend_wait_time // 60}분")
+                    break  # 성공하면 루프 종료
+                else:
+                    raise Exception("파일이 생성되지 않았습니다.")
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"⚠️ 설정 파일 저장 시도 {attempt + 1}/{max_retries} 실패, 재시도 중...: {e}")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"❌ 설정 파일 저장 최종 실패 ({max_retries}회 시도): {e}", exc_info=True)
+        
+        # 참고: 환경 변수는 Python에서 직접 변경할 수 없으므로
+        # Render 대시보드에서 수동으로 설정해야 합니다.
+        # 환경 변수 설정 방법 안내 로그
+        logger.info(f"💡 참고: Render 재시작 후에도 설정을 유지하려면 Render 대시보드의 Environment Variables에서 다음을 설정하세요:")
+        logger.info(f"   MESSAGE_INTERVAL_SECONDS={current_message_interval}")
+        logger.info(f"   RESEND_WAIT_TIME_SECONDS={current_resend_wait_time}")
     
     async def send_first_message_to_new_group(self, group_id: str, message_id: int):
         """새로 등록된 그룹에 첫 메시지만 즉시 전송 (중복 방지)"""
@@ -921,8 +1173,10 @@ class TelegramChannelForwarder:
                     
                     for idx, message_id in enumerate(channel_message_ids, 1):
                         if not self.is_running:
+                            logger.warning("봇이 중지되어 메시지 전송을 중단합니다.")
                             return
                         
+                        logger.info(f"🔄 메시지 {idx}/{len(channel_message_ids)} 처리 시작 (ID: {message_id})")
                         message_data = {
                             'chat_id': int(SOURCE_CHANNEL_ID),
                             'message_id': message_id,
@@ -930,16 +1184,44 @@ class TelegramChannelForwarder:
                         }
                         
                         try:
-                            await self.forward_message(message_data)
-                            # 전송 성공 시 기록 (로그용)
-                            sent_messages[message_id] = time.time()
-                            logger.info(f"[사이클 {cycle}, {idx}/{len(channel_message_ids)}] 메시지 전송 완료 (ID: {message_id})")
+                            # forward_message는 성공 시 True, 실패 시 False 반환
+                            success = await self.forward_message(message_data)
+                            
+                            if success:
+                                # 전송 성공 시 기록 (로그용)
+                                sent_messages[message_id] = time.time()
+                                logger.info(f"✅ [사이클 {cycle}, {idx}/{len(channel_message_ids)}] 메시지 전송 완료 (ID: {message_id})")
+                            else:
+                                # 전송 실패 시 재시도 (최대 3회)
+                                logger.warning(f"⚠️ [사이클 {cycle}, {idx}/{len(channel_message_ids)}] 메시지 전송 실패 (ID: {message_id}). 재시도 중...")
+                                retry_success = False
+                                for retry in range(3):
+                                    await asyncio.sleep(2)  # 2초 대기 후 재시도
+                                    retry_success = await self.forward_message(message_data)
+                                    if retry_success:
+                                        logger.info(f"✅ 재시도 성공! (ID: {message_id}, 시도: {retry + 1}/3)")
+                                        sent_messages[message_id] = time.time()
+                                        break
+                                    else:
+                                        logger.warning(f"⚠️ 재시도 실패 (ID: {message_id}, 시도: {retry + 1}/3)")
+                                
+                                if not retry_success:
+                                    logger.error(f"❌ [사이클 {cycle}, {idx}/{len(channel_message_ids)}] 메시지 전송 최종 실패 (ID: {message_id}). 다음 메시지로 진행합니다.")
                             
                             # 마지막 메시지가 아니면 설정된 간격만큼 대기
+                            # 주의: current_message_interval은 전역 변수이므로 설정 변경 시 즉시 반영됨
                             if idx < len(channel_message_ids):
+                                # 현재 설정값을 다시 읽어서 최신 값 사용 (설정 변경 즉시 반영)
                                 interval_min = current_message_interval // 60
-                                logger.info(f"다음 메시지까지 {interval_min}분 대기 중...")
-                                await asyncio.sleep(current_message_interval)
+                                interval_sec = current_message_interval
+                                logger.info(f"⏳ 다음 메시지까지 {interval_min}분 ({interval_sec}초) 대기 중... (현재 설정값 적용)")
+                                try:
+                                    await asyncio.sleep(current_message_interval)
+                                    logger.info(f"✅ 대기 완료. 다음 메시지 전송 시작...")
+                                except Exception as sleep_error:
+                                    logger.error(f"❌ 대기 중 오류 발생: {sleep_error}", exc_info=True)
+                                    # 오류가 발생해도 다음 메시지로 진행
+                                    await asyncio.sleep(1)  # 최소 1초 대기 후 계속
                         except Exception as e:
                             error_msg = str(e).lower()
                             # 메시지가 실제로 존재하지 않는 경우에만 목록에서 제거
@@ -953,7 +1235,11 @@ class TelegramChannelForwarder:
                                 logger.error(f"메시지 전달 실패 (ID: {message_id}): {e} (목록에서 제거하지 않음)")
                             # 실패해도 다음 메시지로 진행
                             if idx < len(channel_message_ids):
+                                interval_min = current_message_interval // 60
+                                interval_sec = current_message_interval
+                                logger.info(f"⏳ 다음 메시지까지 {interval_min}분 ({interval_sec}초) 대기 중... (오류 후)")
                                 await asyncio.sleep(current_message_interval)
+                                logger.info(f"✅ 대기 완료. 다음 메시지 전송 시작... (오류 후)")
                     
                     # 한 사이클 완료 후 재전송 대기 시간만큼 대기 후 다시 시작
                     # 메시지가 없으면 사이클 종료
@@ -963,8 +1249,11 @@ class TelegramChannelForwarder:
                     
                     # 사이클 간 재전송 대기 시간 적용
                     resend_wait_min = current_resend_wait_time // 60
-                    logger.info(f"=== {cycle}번째 사이클 완료. 다음 사이클까지 {resend_wait_min}분 대기 중... ===")
+                    resend_wait_sec = current_resend_wait_time
+                    logger.info(f"✅ {cycle}번째 사이클 완료! (총 {len(channel_message_ids)}개 메시지 전송 완료)")
+                    logger.info(f"⏳ 다음 사이클까지 {resend_wait_min}분 ({resend_wait_sec}초) 대기 중...")
                     await asyncio.sleep(current_resend_wait_time)
+                    logger.info(f"✅ 대기 완료! {cycle + 1}번째 사이클 시작합니다...")
                     cycle += 1
                     
             except Exception as e:
@@ -976,18 +1265,20 @@ class TelegramChannelForwarder:
         await self.send_messages_to_group()
 
 def run_keepalive_server():
-    """KeepAlive 웹서버를 별도 스레드에서 실행"""
+    """KeepAlive 웹서버를 별도 스레드에서 실행 (Render에서도 작동)"""
     try:
         from keepalive import run_keepalive
         import threading
         import os
-        # Replit에서는 환경 변수 PORT를 사용
+        # Render에서는 PORT 환경변수를 사용 (자동 할당됨)
         port = int(os.environ.get('PORT', 8080))
+        logger.info(f"KeepAlive 서버 시작: 포트 {port} (PORT 환경변수: {os.environ.get('PORT', '없음')})")
         keepalive_thread = threading.Thread(target=run_keepalive, args=(port,), daemon=True)
         keepalive_thread.start()
-        logger.info(f"KeepAlive 서버가 시작되었습니다. (Replit 잠자기 방지, 포트: {port})")
+        logger.info(f"✅ KeepAlive 서버가 시작되었습니다. (Render/UptimeRobot용, 포트: {port})")
+        logger.info(f"🌐 KeepAlive URL: http://0.0.0.0:{port}/")
     except Exception as e:
-        logger.warning(f"KeepAlive 서버 시작 실패: {e}")
+        logger.warning(f"⚠️ KeepAlive 서버 시작 실패: {e} (봇은 정상 작동합니다)")
 
 def main():
     """메인 함수"""
