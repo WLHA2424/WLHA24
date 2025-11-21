@@ -6,7 +6,7 @@ from queue import Queue
 from typing import List
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from config import BOT_TOKEN, SOURCE_CHANNEL_ID, TARGET_GROUP_IDS, SEND_INTERVAL_HOURS, SEND_INTERVAL_MINUTES
+from config import BOT_TOKEN, SOURCE_CHANNEL_ID, TARGET_GROUP_IDS, SEND_INTERVAL_HOURS, SEND_INTERVAL_MINUTES, REGISTER_PASSWORD
 
 # Windows에서 이벤트 루프 정책 설정
 if sys.platform == 'win32':
@@ -44,6 +44,9 @@ channel_message_ids: List[int] = []
 
 # 등록된 그룹 ID 목록 (동적으로 추가 가능)
 registered_group_ids: List[str] = []
+
+# 비밀번호 입력 대기 중인 사용자 (user_id: group_id)
+pending_registrations: dict = {}
 
 # 전송 간격 계산 (초 단위)
 send_interval_seconds = (SEND_INTERVAL_HOURS * 3600) + (SEND_INTERVAL_MINUTES * 60)
@@ -144,26 +147,107 @@ class TelegramChannelForwarder:
             """그룹에서 메시지를 받았을 때 처리 (그룹 등록용)"""
             if update.message and update.message.chat.type in ['group', 'supergroup']:
                 text = update.message.text
-                if text and (text.strip() == '/등록' or text.strip() == '/register'):
-                    group_id = str(update.message.chat.id)
-                    if group_id not in registered_group_ids:
-                        registered_group_ids.append(group_id)
-                        await self.save_groups_to_file()
-                        await self.application.bot.send_message(
-                            chat_id=group_id,
-                            text=f"✅ 이 그룹이 등록되었습니다!\n그룹 ID: {group_id}\n이제 비공개 채널의 메시지가 이 그룹에도 자동으로 전송됩니다."
-                        )
-                        logger.info(f"새 그룹 등록: {group_id} (총 {len(registered_group_ids)}개)")
-                    else:
+                # 텔레그램 봇 명령어는 /월하 또는 /월하@botusername 형식으로 올 수 있음
+                if text:
+                    # @botusername 부분 제거하고 명령어만 추출
+                    command = text.split()[0].split('@')[0].strip() if text.split() else ""
+                    logger.info(f"그룹 메시지 수신: chat_id={update.message.chat.id}, user_id={update.message.from_user.id}, text={text}, command={command}")
+                    
+                    if command == '/월하':
+                        group_id = str(update.message.chat.id)
+                        user_id = update.message.from_user.id
+                        logger.info(f"/월하 명령어 감지: 그룹={group_id}, 사용자={user_id}")
+                    
+                    # 이미 등록된 그룹인지 확인
+                    if group_id in registered_group_ids:
                         await self.application.bot.send_message(
                             chat_id=group_id,
                             text=f"ℹ️ 이 그룹은 이미 등록되어 있습니다.\n그룹 ID: {group_id}"
                         )
+                        return
+                    
+                    # 비밀번호 입력 대기 상태로 설정
+                    pending_registrations[user_id] = group_id
+                    
+                    # 그룹에 안내 메시지
+                    await self.application.bot.send_message(
+                        chat_id=group_id,
+                        text="🔐 그룹 등록을 위해 비밀번호가 필요합니다.\n봇과의 개인 대화에서 비밀번호를 입력해주세요."
+                    )
+                    
+                    # 사용자에게 DM으로 비밀번호 요청
+                    try:
+                        await self.application.bot.send_message(
+                            chat_id=user_id,
+                            text=f"🔐 그룹 등록을 위한 비밀번호를 입력해주세요.\n그룹 ID: {group_id}\n\n비밀번호를 입력하세요:"
+                        )
+                        logger.info(f"비밀번호 입력 대기: 사용자 {user_id}, 그룹 {group_id}")
+                    except Exception as e:
+                        logger.error(f"DM 전송 실패 (사용자 {user_id}): {e}")
+                        # DM을 보낼 수 없으면 그룹에 안내
+                        await self.application.bot.send_message(
+                            chat_id=group_id,
+                            text="❌ 봇과의 개인 대화를 먼저 시작해주세요.\n(봇에게 아무 메시지나 보내면 됩니다)"
+                        )
+                        if user_id in pending_registrations:
+                            del pending_registrations[user_id]
         
         self.application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, group_message_handler))
         
+        # 개인 메시지 핸들러 (비밀번호 입력용)
+        async def private_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            """개인 메시지를 받았을 때 처리 (비밀번호 확인용)"""
+            if update.message and update.message.chat.type == 'private':
+                user_id = update.message.from_user.id
+                text = update.message.text.strip() if update.message.text else ""
+                
+                # 비밀번호 입력 대기 중인 사용자인지 확인
+                if user_id in pending_registrations:
+                    group_id = pending_registrations[user_id]
+                    
+                    # 비밀번호 확인
+                    if text == REGISTER_PASSWORD:
+                        # 그룹 등록
+                        if group_id not in registered_group_ids:
+                            registered_group_ids.append(group_id)
+                            await self.save_groups_to_file()
+                            logger.info(f"새 그룹 등록: {group_id} (총 {len(registered_group_ids)}개, 사용자: {user_id})")
+                            
+                            # 사용자에게 성공 메시지
+                            await self.application.bot.send_message(
+                                chat_id=user_id,
+                                text=f"✅ 비밀번호가 확인되었습니다!\n그룹이 등록되었습니다.\n그룹 ID: {group_id}\n이제 비공개 채널의 메시지가 이 그룹에도 자동으로 전송됩니다."
+                            )
+                            
+                            # 그룹에도 성공 메시지
+                            try:
+                                await self.application.bot.send_message(
+                                    chat_id=group_id,
+                                    text=f"✅ 그룹이 등록되었습니다!\n그룹 ID: {group_id}\n이제 비공개 채널의 메시지가 이 그룹에도 자동으로 전송됩니다."
+                                )
+                            except:
+                                pass
+                        else:
+                            await self.application.bot.send_message(
+                                chat_id=user_id,
+                                text=f"ℹ️ 이 그룹은 이미 등록되어 있습니다.\n그룹 ID: {group_id}"
+                            )
+                        
+                        # 대기 상태 제거
+                        del pending_registrations[user_id]
+                    else:
+                        # 비밀번호 오류
+                        await self.application.bot.send_message(
+                            chat_id=user_id,
+                            text="❌ 비밀번호가 올바르지 않습니다.\n다시 입력해주세요:"
+                        )
+                        logger.warning(f"잘못된 비밀번호 입력 시도: 사용자 {user_id}, 그룹 {group_id}")
+        
+        self.application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, private_message_handler))
+        
         logger.info("채널 포스트 핸들러가 등록되었습니다.")
-        logger.info("그룹 메시지 핸들러가 등록되었습니다. (그룹에서 /등록 명령어 사용 가능)")
+        logger.info("그룹 메시지 핸들러가 등록되었습니다. (그룹에서 /월하 명령어 사용 가능, 비밀번호 필요)")
+        logger.info("개인 메시지 핸들러가 등록되었습니다. (비밀번호 입력용)")
         
         self.is_running = True
         
@@ -407,7 +491,7 @@ class TelegramChannelForwarder:
         global registered_group_ids
         
         if not registered_group_ids:
-            logger.warning("등록된 그룹이 없습니다. 그룹에서 /등록 명령어를 사용하세요.")
+            logger.warning("등록된 그룹이 없습니다. 그룹에서 /월하 명령어를 사용하세요.")
             return None
         
         success_count = 0
@@ -549,7 +633,7 @@ class TelegramChannelForwarder:
             with open(groups_file, 'w', encoding='utf-8') as f:
                 f.write("# 등록된 그룹 ID 목록\n")
                 f.write("# 한 줄에 하나씩 그룹 ID만 입력\n")
-                f.write("# 그룹에서 /등록 명령어로 자동 추가됨\n\n")
+                f.write("# 그룹에서 /월하 명령어로 자동 추가됨\n\n")
                 for group_id in registered_group_ids:
                     f.write(f"{group_id}\n")
             logger.debug(f"그룹 ID {len(registered_group_ids)}개를 파일에 저장했습니다.")
