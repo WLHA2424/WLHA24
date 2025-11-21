@@ -30,6 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Conflict 에러는 자동 재시도되므로 로그 레벨을 낮춤
+logging.getLogger('telegram.ext.Updater').setLevel(logging.WARNING)
+
 # 메시지 큐
 message_queue: Queue = Queue()
 
@@ -127,10 +130,12 @@ class TelegramChannelForwarder:
         # 모든 업데이트를 받는 핸들러 추가 (가장 높은 우선순위)
         from telegram.ext import TypeHandler
         
-        # 채널 포스트를 받기 위한 핸들러 (모든 Update 타입 처리)
+        # 채널 포스트를 받기 위한 핸들러 (채널 포스트만 처리)
         async def all_updates_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            """모든 업데이트를 확인하여 채널 포스트 처리"""
-            await channel_post_handler(update, context)
+            """채널 포스트만 처리 (그룹 메시지는 제외)"""
+            # 채널 포스트나 수정된 채널 포스트만 처리
+            if update.channel_post or update.edited_channel_post:
+                await channel_post_handler(update, context)
         
         self.application.add_handler(TypeHandler(Update, all_updates_handler), group=-1)
         
@@ -175,6 +180,31 @@ class TelegramChannelForwarder:
         try:
             await self.application.initialize()
             await self.application.start()
+            
+            # Webhook이 설정되어 있으면 삭제 (Conflict 방지)
+            try:
+                # 여러 번 시도하여 확실히 삭제
+                for attempt in range(3):
+                    try:
+                        webhook_info = await self.application.bot.get_webhook_info()
+                        if webhook_info.url:
+                            logger.info(f"Webhook 발견: {webhook_info.url}, 삭제 중...")
+                            await self.application.bot.delete_webhook(drop_pending_updates=True)
+                            await asyncio.sleep(1)  # 삭제 후 잠시 대기
+                        logger.info("Webhook 삭제 완료 (Polling 모드 사용)")
+                        break
+                    except Exception as e:
+                        if attempt < 2:
+                            logger.warning(f"Webhook 삭제 시도 {attempt + 1}/3 실패, 재시도 중...: {e}")
+                            await asyncio.sleep(2)
+                        else:
+                            logger.warning(f"Webhook 삭제 최종 실패 (무시): {e}")
+            except Exception as e:
+                logger.warning(f"Webhook 확인 중 오류 (무시): {e}")
+            
+            # Polling 시작 전 잠시 대기 (다른 인스턴스 종료 대기)
+            await asyncio.sleep(2)
+            
             await self.application.updater.start_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True
