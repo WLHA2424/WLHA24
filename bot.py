@@ -633,8 +633,13 @@ class TelegramChannelForwarder:
             for msg_data in messages_to_send:
                 message_queue.put(msg_data)
     
-    async def forward_message(self, msg_data: dict):
-        """개별 메시지를 모든 등록된 그룹으로 전달 (텔레그램 forward API 사용)"""
+    async def forward_message(self, msg_data: dict, skip_first_message_check: bool = False):
+        """개별 메시지를 모든 등록된 그룹으로 전달 (텔레그램 forward API 사용)
+        
+        Args:
+            msg_data: 전송할 메시지 데이터
+            skip_first_message_check: True이면 첫 메시지 스킵 로직을 사용하지 않음 (사이클에서 사용)
+        """
         global registered_group_ids, new_group_first_message_sent, channel_message_ids
         
         if not registered_group_ids:
@@ -644,12 +649,13 @@ class TelegramChannelForwarder:
         success_count = 0
         failed_groups = []
         
-        # 첫 메시지인지 확인 (중복 방지)
-        is_first_message = (channel_message_ids and msg_data['message_id'] == channel_message_ids[0])
+        # 첫 메시지인지 확인 (중복 방지) - skip_first_message_check가 False일 때만
+        is_first_message = (not skip_first_message_check and channel_message_ids and msg_data['message_id'] == channel_message_ids[0])
         
         for group_id in registered_group_ids:
             # 첫 메시지이고 새로 등록된 그룹에 이미 전송했다면 스킵 (중복 방지)
-            if is_first_message and new_group_first_message_sent.get(group_id, False):
+            # 단, skip_first_message_check가 True이면 스킵하지 않음 (사이클에서는 모든 메시지 전송)
+            if is_first_message and not skip_first_message_check and new_group_first_message_sent.get(group_id, False):
                 logger.info(f"ℹ️ 그룹 {group_id}에 첫 메시지는 이미 전송되었습니다. 스킵합니다. (정상 동작)")
                 success_count += 1  # 이미 전송된 것이므로 성공으로 카운트
                 continue
@@ -746,45 +752,60 @@ class TelegramChannelForwarder:
                             break
                     
                     # 전달한 메시지를 고정 (pin) - 메시지가 실제로 존재하는지 확인하는 방법
-                    message_pinned = False
-                    try:
-                        await self.application.bot.pin_chat_message(
-                            chat_id=group_id,
-                            message_id=forwarded_message_id
-                        )
-                        message_pinned = True
-                        logger.info(f"📌 메시지 고정 완료! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
-                    except Exception as pin_error:
-                        error_msg = str(pin_error).lower()
-                        # 메시지가 존재하지 않는 경우
-                        if "message to pin not found" in error_msg or "message not found" in error_msg:
-                            logger.error(f"❌ 메시지가 그룹에 존재하지 않습니다. 전송 실패로 처리합니다. (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
-                            if retry_count < max_retries - 1:
-                                retry_count += 1
-                                continue
-                            else:
-                                failed_groups.append(group_id)
-                                break
-                        else:
-                            # 권한 문제 등 다른 에러는 경고만
-                            logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}): {pin_error} (봇이 그룹에서 메시지를 고정할 권한이 없을 수 있습니다)")
-                            # 고정 실패해도 메시지는 전송되었을 수 있으므로 계속 진행
-                            message_pinned = True
+                    message_actually_sent = False
+                    pin_error_occurred = False
+                    pin_error_msg = ""
                     
-                    # 메시지 고정 성공 또는 권한 문제인 경우에만 성공으로 처리
-                    if message_pinned:
-                        # 검증 완료 후에만 성공 로그 출력
-                        logger.info(f"✅ 메시지 전달 성공! (원본 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}, 그룹: {group_id})")
-                        success_count += 1
-                        success = True
-                    else:
-                        logger.error(f"❌ 메시지 전송 실패: 메시지가 그룹에 존재하지 않습니다. (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                    try:
+                        # 메시지 전송 후 잠시 대기 (전송 완료 대기)
+                        await asyncio.sleep(1)
+                        
+                        # 메시지 고정 시도 (메시지가 실제로 존재하는지 확인)
+                        try:
+                            await self.application.bot.pin_chat_message(
+                                chat_id=group_id,
+                                message_id=forwarded_message_id
+                            )
+                            message_actually_sent = True
+                            logger.info(f"📌 메시지 고정 성공 → 메시지가 실제로 그룹에 존재함 확인! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                        except Exception as pin_error:
+                            pin_error_occurred = True
+                            pin_error_msg = str(pin_error)
+                            error_msg_lower = pin_error_msg.lower()
+                            
+                            # 메시지가 존재하지 않는 경우
+                            if "message to pin not found" in error_msg_lower or "message not found" in error_msg_lower or "bad request: message to pin not found" in error_msg_lower:
+                                logger.error(f"❌ 메시지 고정 실패: 메시지가 그룹에 존재하지 않습니다! (그룹: {group_id}, 메시지 ID: {forwarded_message_id})")
+                                logger.error(f"   → forward_message API는 성공했지만 실제로는 메시지가 전송되지 않았습니다.")
+                                message_actually_sent = False
+                            else:
+                                # 권한 문제 등 다른 에러는 메시지는 전송되었을 수 있음
+                                logger.warning(f"⚠️ 메시지 고정 실패 (그룹: {group_id}): {pin_error}")
+                                logger.warning(f"   → 권한 문제일 수 있으므로 메시지는 전송되었을 것으로 간주합니다.")
+                                message_actually_sent = True  # 권한 문제는 메시지는 전송되었을 수 있음
+                    
+                    except Exception as verify_error:
+                        logger.error(f"❌ 메시지 고정 확인 중 예외 발생: {verify_error}")
+                        # 예외 발생 시 안전하게 실패 처리
+                        message_actually_sent = False
+                    
+                    # 실제로 메시지가 전송되었는지 확인
+                    if not message_actually_sent:
+                        logger.error(f"❌ 메시지 전송 실패 확인: forward_message API는 성공했지만 실제로는 메시지가 그룹에 존재하지 않습니다.")
+                        logger.error(f"   그룹: {group_id}, 원본 메시지 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}")
                         if retry_count < max_retries - 1:
                             retry_count += 1
+                            logger.info(f"🔄 재시도 예정... (재시도 횟수: {retry_count}/{max_retries - 1})")
                             continue
                         else:
+                            logger.error(f"❌ 최종 전송 실패: 모든 재시도 실패")
                             failed_groups.append(group_id)
                             break
+                    
+                    # 실제로 메시지가 전송되었음을 확인한 후에만 성공 로그 출력
+                    logger.info(f"✅ 메시지 전달 성공 확인! (원본 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}, 그룹: {group_id})")
+                    success_count += 1
+                    success = True
                     # API 제한을 피하기 위해 약간의 지연
                     await asyncio.sleep(0.3)
                     break  # 성공 시 루프 종료
@@ -1275,6 +1296,14 @@ class TelegramChannelForwarder:
                 while self.is_running and channel_message_ids:  # 메시지가 있을 때만 사이클 실행
                     logger.info(f"=== {cycle}번째 사이클 시작 (총 {len(channel_message_ids)}개 메시지) ===")
                     
+                    # 사이클 시작 시 첫 메시지 스킵 플래그 초기화 (모든 메시지를 정상적으로 전송하기 위해)
+                    # 첫 메시지 스킵 로직은 새 그룹 등록 시에만 필요하므로, 사이클에서는 모든 메시지를 전송해야 함
+                    global new_group_first_message_sent
+                    for group_id in registered_group_ids:
+                        if new_group_first_message_sent.get(group_id, False):
+                            logger.debug(f"그룹 {group_id}의 첫 메시지 스킵 플래그 초기화 (사이클 시작)")
+                    new_group_first_message_sent.clear()
+                    
                     for idx, message_id in enumerate(channel_message_ids, 1):
                         if not self.is_running:
                             logger.warning("봇이 중지되어 메시지 전송을 중단합니다.")
@@ -1289,7 +1318,8 @@ class TelegramChannelForwarder:
                         
                         try:
                             # forward_message는 성공 시 True, 실패 시 False 반환
-                            success = await self.forward_message(message_data)
+                            # 사이클에서는 첫 메시지 스킵 로직을 사용하지 않음 (모든 메시지 전송)
+                            success = await self.forward_message(message_data, skip_first_message_check=True)
                             
                             if success:
                                 # 전송 성공 시 기록 (로그용)
@@ -1301,7 +1331,7 @@ class TelegramChannelForwarder:
                                 retry_success = False
                                 for retry in range(3):
                                     await asyncio.sleep(2)  # 2초 대기 후 재시도
-                                    retry_success = await self.forward_message(message_data)
+                                    retry_success = await self.forward_message(message_data, skip_first_message_check=True)
                                     if retry_success:
                                         logger.info(f"✅ 재시도 성공! (ID: {message_id}, 시도: {retry + 1}/3)")
                                         sent_messages[message_id] = time.time()
