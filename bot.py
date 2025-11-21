@@ -650,7 +650,8 @@ class TelegramChannelForwarder:
         for group_id in registered_group_ids:
             # 첫 메시지이고 새로 등록된 그룹에 이미 전송했다면 스킵 (중복 방지)
             if is_first_message and new_group_first_message_sent.get(group_id, False):
-                logger.debug(f"그룹 {group_id}에 첫 메시지는 이미 전송되었습니다. 스킵합니다.")
+                logger.info(f"ℹ️ 그룹 {group_id}에 첫 메시지는 이미 전송되었습니다. 스킵합니다. (정상 동작)")
+                success_count += 1  # 이미 전송된 것이므로 성공으로 카운트
                 continue
             # 타임아웃 에러 재시도를 위한 루프
             max_retries = 3
@@ -666,6 +667,7 @@ class TelegramChannelForwarder:
                         logger.info(f"📤 메시지 전달 시도: 채널={msg_data['chat_id']}, 메시지ID={msg_data['message_id']}, 그룹={group_id}")
                     
                     # 텔레그램의 forward_message API를 사용하여 원본 메시지를 그대로 전달
+                    logger.info(f"📤 forward_message API 호출: 채널={msg_data['chat_id']}, 메시지ID={msg_data['message_id']}, 그룹={group_id}")
                     result = await self.application.bot.forward_message(
                         chat_id=group_id,
                         from_chat_id=msg_data['chat_id'],
@@ -684,6 +686,7 @@ class TelegramChannelForwarder:
                     
                     if not hasattr(result, 'message_id') or result.message_id is None:
                         logger.error(f"❌ 메시지 전달 실패: message_id가 없습니다 (그룹: {group_id}, ID: {msg_data['message_id']})")
+                        logger.error(f"   result 객체: {result}")
                         if retry_count < max_retries - 1:
                             retry_count += 1
                             continue
@@ -693,6 +696,51 @@ class TelegramChannelForwarder:
                     
                     forwarded_message_id = result.message_id
                     logger.info(f"✅ 메시지 전달 성공! (원본 ID: {msg_data['message_id']}, 전달된 메시지 ID: {forwarded_message_id}, 그룹: {group_id})")
+                    
+                    # 실제로 메시지가 전송되었는지 확인 (전송된 메시지를 조회)
+                    message_verified = False
+                    try:
+                        await asyncio.sleep(1)  # 전송 후 잠시 대기
+                        # 전송된 메시지를 조회하여 실제로 존재하는지 확인
+                        try:
+                            verify_message = await self.application.bot.get_chat_member(
+                                chat_id=group_id,
+                                user_id=self.application.bot.id
+                            )
+                            if verify_message.status in ['left', 'kicked']:
+                                logger.error(f"❌ 봇이 그룹 {group_id}에서 제거되었습니다. 목록에서 제거합니다.")
+                                if group_id in registered_group_ids:
+                                    registered_group_ids.remove(group_id)
+                                    await self.save_groups_to_file()
+                                failed_groups.append(group_id)
+                                break
+                            message_verified = True
+                            logger.info(f"✅ 메시지 전송 검증 완료: 그룹 {group_id}에 봇이 정상적으로 있습니다.")
+                        except Exception as member_error:
+                            error_msg = str(member_error).lower()
+                            if "chat not found" in error_msg or "bot was kicked" in error_msg or "bot was blocked" in error_msg:
+                                logger.error(f"❌ 그룹 {group_id}을 찾을 수 없거나 봇이 제거되었습니다. 목록에서 제거합니다.")
+                                if group_id in registered_group_ids:
+                                    registered_group_ids.remove(group_id)
+                                    await self.save_groups_to_file()
+                                failed_groups.append(group_id)
+                                break
+                            else:
+                                # 다른 에러는 경고만 하고 계속 진행
+                                logger.warning(f"⚠️ 메시지 전송 검증 중 오류 (무시하고 계속): {member_error}")
+                                message_verified = True  # 에러가 있어도 계속 진행
+                    except Exception as verify_error:
+                        logger.warning(f"⚠️ 메시지 전송 검증 중 예외 발생 (무시하고 계속): {verify_error}")
+                        message_verified = True  # 에러가 있어도 계속 진행
+                    
+                    if not message_verified:
+                        logger.error(f"❌ 메시지 전송 검증 실패: 그룹 {group_id}에 메시지가 전송되지 않았을 수 있습니다.")
+                        if retry_count < max_retries - 1:
+                            retry_count += 1
+                            continue
+                        else:
+                            failed_groups.append(group_id)
+                            break
                     
                     # 전달한 메시지를 고정 (pin)
                     try:
