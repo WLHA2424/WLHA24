@@ -666,7 +666,7 @@ class TelegramChannelForwarder:
             if not channel_message_ids:
                 return
             
-            logger.info(f"그룹 {group_id}에 기존 메시지 {len(channel_message_ids)}개 즉시 전송 중...")
+            logger.info(f"그룹 {group_id}에 기존 메시지 {len(channel_message_ids)}개 전송 시작 (첫 메시지만 즉시, 나머지는 10분 간격)...")
             
             for idx, message_id in enumerate(channel_message_ids, 1):
                 message_data = {
@@ -715,9 +715,11 @@ class TelegramChannelForwarder:
                         else:
                             logger.error(f"기존 메시지 전송 최종 실패 (그룹: {group_id}, ID: {message_id}): {e}")
                 
-                # API 제한을 피하기 위해 약간의 지연
+                # 첫 메시지는 즉시 전송, 나머지는 10분 간격으로 전송
                 if idx < len(channel_message_ids):
-                    await asyncio.sleep(1)  # 1초 간격
+                    interval_min = current_message_interval // 60
+                    logger.info(f"다음 메시지까지 {interval_min}분 대기 중...")
+                    await asyncio.sleep(current_message_interval)
             
             logger.info(f"그룹 {group_id}에 기존 메시지 전송 완료")
         except Exception as e:
