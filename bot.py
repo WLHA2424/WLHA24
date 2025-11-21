@@ -213,7 +213,9 @@ class TelegramChannelForwarder:
                     group_id = pending_registrations[user_id]
                     
                     # 비밀번호 확인
+                    logger.info(f"🔐 비밀번호 확인 시도: 사용자 {user_id}, 그룹 {group_id}, 입력값: '{text}'")
                     if text == REGISTER_PASSWORD:
+                        logger.info(f"✅ 비밀번호 일치! 그룹 등록 진행 중...")
                         # 그룹 등록
                         if group_id not in registered_group_ids:
                             registered_group_ids.append(group_id)
@@ -221,14 +223,23 @@ class TelegramChannelForwarder:
                             logger.info(f"✅ 새 그룹 등록 완료: {group_id} (총 {len(registered_group_ids)}개, 사용자: {user_id})")
                             logger.info(f"📝 저장된 그룹 목록: {registered_group_ids}")
                             
+                            # 사용자에게 성공 메시지
+                            try:
+                                await self.application.bot.send_message(
+                                    chat_id=user_id,
+                                    text=f"✅ 그룹 등록이 완료되었습니다!\n그룹 ID: {group_id}\n\n이제 채널 메시지가 이 그룹으로 전송됩니다."
+                                )
+                            except Exception as e:
+                                logger.error(f"사용자 DM 전송 실패: {e}")
+                            
                             # 그룹에 성공 메시지
                             try:
                                 await self.application.bot.send_message(
                                     chat_id=group_id,
                                     text="✅ 그룹이 등록되었습니다!"
                                 )
-                            except:
-                                pass
+                            except Exception as e:
+                                logger.error(f"그룹 메시지 전송 실패: {e}")
                             
                             # 새 그룹 등록 시 첫 메시지만 즉시 전송 (중복 방지)
                             if channel_message_ids:
@@ -246,6 +257,14 @@ class TelegramChannelForwarder:
                                 else:
                                     logger.info(f"⏳ 봇이 완전히 시작된 후 첫 메시지 전송 예정")
                                     asyncio.create_task(self.send_first_message_to_new_group(group_id, first_message_id))
+                            else:
+                                logger.warning(f"⚠️ 등록된 메시지가 없습니다. 채널에 메시지를 먼저 보내주세요.")
+                        else:
+                            logger.info(f"ℹ️ 그룹 {group_id}는 이미 등록되어 있습니다.")
+                            await self.application.bot.send_message(
+                                chat_id=user_id,
+                                text=f"ℹ️ 이 그룹은 이미 등록되어 있습니다.\n그룹 ID: {group_id}"
+                            )
                         else:
                             await self.application.bot.send_message(
                                 chat_id=user_id,
@@ -328,50 +347,63 @@ class TelegramChannelForwarder:
                 logger.warning(f"⚠️ Webhook 확인 중 오류 (무시하고 계속 진행): {e}")
             
             # Polling 시작 전 충분한 대기 시간 (배포 중 이전 인스턴스 종료 대기)
-            logger.info("⏳ 이전 인스턴스 종료 대기 중... (10초)")
-            await asyncio.sleep(10)  # 5초에서 10초로 증가
+            logger.info("⏳ 이전 인스턴스 완전 종료 대기 중... (20초)")
+            await asyncio.sleep(20)  # Render 배포 시 이전 인스턴스가 완전히 종료될 때까지 충분한 대기
             
-            # 추가 안전 장치: Webhook 재확인 및 삭제
-            try:
-                webhook_info_final = await self.application.bot.get_webhook_info()
-                if webhook_info_final.url:
-                    logger.warning(f"⚠️ Webhook이 여전히 존재합니다: {webhook_info_final.url}, 강제 삭제 시도...")
-                    await self.application.bot.delete_webhook(drop_pending_updates=True)
-                    await asyncio.sleep(2)
-            except Exception as e:
-                logger.warning(f"⚠️ 최종 Webhook 확인 중 오류 (무시): {e}")
+            # 추가 안전 장치: Webhook 재확인 및 삭제 (여러 번 시도)
+            for final_attempt in range(3):
+                try:
+                    webhook_info_final = await self.application.bot.get_webhook_info()
+                    if webhook_info_final.url:
+                        logger.warning(f"⚠️ Webhook이 여전히 존재합니다: {webhook_info_final.url}, 강제 삭제 시도... (시도: {final_attempt + 1}/3)")
+                        await self.application.bot.delete_webhook(drop_pending_updates=True)
+                        await asyncio.sleep(3)
+                    else:
+                        logger.info("✅ 최종 확인: Webhook이 없습니다. Polling 모드 사용 가능")
+                        break
+                except Exception as e:
+                    if "conflict" in str(e).lower():
+                        logger.warning(f"⚠️ Conflict 에러 발생. {5 * (final_attempt + 1)}초 대기 후 재시도...")
+                        await asyncio.sleep(5 * (final_attempt + 1))
+                    else:
+                        logger.warning(f"⚠️ 최종 Webhook 확인 중 오류 (무시): {e}")
+                        break
             
             # Polling 시작 (Conflict 에러는 자동으로 재시도됨)
             logger.info("🚀 Polling 시작 중...")
-            try:
-                await self.application.updater.start_polling(
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True
-                )
-                logger.info("✅ 봇이 완전히 시작되었습니다!")
-                self.is_fully_started = True  # 봇 시작 완료 플래그 설정
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "conflict" in error_msg:
-                    logger.error(f"❌ Polling 시작 중 Conflict 에러 발생: {e}")
-                    logger.info("⏳ 15초 대기 후 재시도...")
-                    await asyncio.sleep(15)
-                    # 재시도
-                    try:
-                        await self.application.bot.delete_webhook(drop_pending_updates=True)
-                        await asyncio.sleep(3)
-                        await self.application.updater.start_polling(
-                            allowed_updates=Update.ALL_TYPES,
-                            drop_pending_updates=True
-                        )
-                        logger.info("✅ 봇이 재시도 후 시작되었습니다!")
-                        self.is_fully_started = True
-                    except Exception as retry_error:
-                        logger.error(f"❌ 재시도도 실패: {retry_error}")
+            max_polling_retries = 5
+            polling_retry_delay = 10
+            
+            for polling_attempt in range(max_polling_retries):
+                try:
+                    await self.application.updater.start_polling(
+                        allowed_updates=Update.ALL_TYPES,
+                        drop_pending_updates=True
+                    )
+                    logger.info("✅ 봇이 완전히 시작되었습니다!")
+                    self.is_fully_started = True  # 봇 시작 완료 플래그 설정
+                    break  # 성공하면 루프 종료
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "conflict" in error_msg:
+                        if polling_attempt < max_polling_retries - 1:
+                            wait_time = polling_retry_delay * (polling_attempt + 1)
+                            logger.warning(f"⚠️ Polling 시작 중 Conflict 에러 발생 (시도: {polling_attempt + 1}/{max_polling_retries})")
+                            logger.info(f"⏳ {wait_time}초 대기 후 재시도... (이전 인스턴스 종료 대기)")
+                            await asyncio.sleep(wait_time)
+                            # Webhook 다시 삭제 시도
+                            try:
+                                await self.application.bot.delete_webhook(drop_pending_updates=True)
+                                await asyncio.sleep(3)
+                            except:
+                                pass
+                        else:
+                            logger.error(f"❌ Polling 시작 최종 실패 (최대 재시도 횟수 초과): {e}")
+                            logger.error("💡 해결 방법: 다른 봇 인스턴스(로컬 PC, Replit 등)를 모두 종료하고 다시 시도하세요.")
+                            raise
+                    else:
+                        logger.error(f"❌ Polling 시작 실패: {e}")
                         raise
-                else:
-                    logger.error(f"❌ Polling 시작 실패: {e}")
-                    raise
             
             # 기존 채널 메시지를 순차적으로 전송하는 작업 시작
             asyncio.create_task(self.send_existing_messages_sequentially())
