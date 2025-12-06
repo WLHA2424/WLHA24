@@ -47,3 +47,8 @@ python bot.py
 
 
 
+
+
+
+
+
